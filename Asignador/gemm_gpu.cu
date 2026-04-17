@@ -1,5 +1,5 @@
 // cublas_gemm_bench.cu
-// Compilar: nvcc -O3 -o cublas_bench cublas_gemm_bench.cu -lcublas
+// Compilar: nvcc -O3 -o gemm_gpu gemm_gpu.cu -lcublas
 
 #include <stdio.h>
 #include <stdlib.h>

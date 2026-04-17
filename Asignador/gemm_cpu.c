@@ -1,11 +1,13 @@
 // blas_gemm_bench.c
-// OpenBLAS: gcc -O3 -o blas_bench blas_gemm_bench.c  -I/usr/include/openblas -lopenblas -lm
-// MKL:      gcc -O3 -o blas_bench blas_gemm_bench.c -lmkl_rt -lm
+// OpenBLAS: gcc -O3 -o gemm_cpu gemm_cpu.c  -I/usr/include/openblas -lopenblas -lm
+// MKL:      gcc -O3 -o gemm_cpu gemm_cpu.c -lmkl_rt -lm
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
 #include <cblas.h>
+#include <bits/time.h>
+#include <linux/time.h>
 
 double get_time_ms() {
     struct timespec ts;
