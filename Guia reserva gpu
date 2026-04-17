@@ -1,0 +1,6 @@
+ENTRAR A FELIX
+srun --partition=gpu_titan --nodes=1 --gres=gpu:1 --pty bash #Ingresa a Felix apartando tambien el uso de la gpu
+nvidia-smi #Verificar GPU Nota: Es posible acceder a un nodo con 2 GPU es importante revisar cual se tiene en uso
+module av #Lista los modulos disponibles
+module load nvhpc #Carga el modulo que contiene las distintas herramientas de nvidia
+pip3 install nvidia-ml-py --user  #Instala la libreria que luego se importa como import import pynvml
