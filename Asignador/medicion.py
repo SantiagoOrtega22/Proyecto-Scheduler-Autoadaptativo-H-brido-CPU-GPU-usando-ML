@@ -3,9 +3,9 @@ import re
 import time
 import threading
 import csv
-import os
 
 #EJECUTAR CON PERMISOS!!!! (sudo)
+
 # ============================================================================
 # FÓRMULAS Y VARIABLES DE CÁLCULO DE EDP
 # ============================================================================
@@ -35,14 +35,12 @@ import os
 #   Variables:
 #     - registro_watts: Lista de todas las potencias instantáneas medidas (W)
 #     - potencia_promedio: Promedio aritmético de todas las muestras (W)
-#     - muestras: Número total de muestras capturadas (-)
 #   Cálculo:
 #     potencia_promedio = sum(registro_watts) / len(registro_watts)
-#     muestras = len(registro_watts)
 #
 # TIEMPO DE EJECUCIÓN:
 #   Variables:
-#     - tiempo_ms: Tiempo de ejecución del programa GEMM (ms)
+#     - tiempo_ms: Tiempo de ejecución (ms)
 #     - tiempo_s: Tiempo convertido a segundos (s)
 #   Cálculo:
 #     tiempo_s = tiempo_ms / 1000.0
@@ -65,16 +63,8 @@ import os
 #   Cálculo:
 #     edp = energia_joules * tiempo_s
 #
-# THROUGHPUT:
-#   Fórmula: GFLOPS = (2 × N³) / (tiempo × 1e6)
-#   Variables:
-#     - N: Tamaño de matriz cuadrada (-)
-#     - gflops: Giga operaciones por segundo (GFLOPS)
-#   Nota: Se extrae del output del programa GEMM
-#
 # ============================================================================
 # Variables globales para comunicar los hilos
-
 
 medicion_activa = False
 registro_watts = []
@@ -110,19 +100,18 @@ def leer_rapl_watts():
         prev_time = current_time
         return 0.0
     except PermissionError:
-        print("❌ ERROR: Sin permisos para leer RAPL")
+        print("ERROR: Sin permisos para leer RAPL")
         return 0.0
     except FileNotFoundError:
-        print("❌ ERROR: RAPL no disponible en este sistema")
+        print("ERROR: RAPL no disponible en este sistema")
         return 0.0
     except Exception as e:
-        print(f"⚠️  Error leyendo RAPL: {e}")
+        print("Error leyendo RAPL: " + str(e))
         return 0.0
 
 def leer_nvml_watts():
     """Lee consumo de GPU usando NVIDIA Management Library"""
     try:
-        # Importar dentro de la función para evitar problemas con sudo
         import pynvml
         
         try:
@@ -133,13 +122,13 @@ def leer_nvml_watts():
             pynvml.nvmlShutdown()
             return watts
         except pynvml.NVMLError as e:
-            print(f"⚠️  NVML Error: {e}")
+            print("NVML Error: " + str(e))
             return 0.0
     except ImportError:
-        print("❌ pynvml no instalado. Ejecuta: pip install pynvml")
+        print("ERROR: pynvml no instalado. Ejecuta: pip install pynvml")
         return 0.0
     except Exception as e:
-        print(f"⚠️  Error leyendo GPU: {e}")
+        print("Error leyendo GPU: " + str(e))
         return 0.0
 
 # ============================================================================
@@ -162,7 +151,7 @@ def monitor_energia(dispositivo):
                 registro_watts.append(watts)
             
         except Exception as e:
-            print(f"Error en monitor: {e}")
+            print("Error en monitor: " + str(e))
         
         time.sleep(0.05)  # Muestrear cada 50ms
 
@@ -170,9 +159,9 @@ def monitor_energia(dispositivo):
 # FUNCIÓN PRINCIPAL: EJECUTAR BENCHMARK Y MEDIR EDP
 # ============================================================================
 
-def ejecutar_y_medir(N, dispositivo , tipo):
+def ejecutar_y_medir(N, dispositivo, benchmark_type):
     """
-    Ejecuta el benchmark GEMM y mide:
+    Ejecuta el benchmark y mide:
     - Tiempo de ejecución
     - Potencia promedio
     - Energía consumida
@@ -200,17 +189,19 @@ def ejecutar_y_medir(N, dispositivo , tipo):
     # --- INICIO DE EJECUCIÓN ---
     start_time = time.time()
     
-    # Lanzar binario GEMM (CPU o GPU)
-    if dispositivo == "cpu" & tipo== "gemm":
-        comando = ["./gemm_cpu", str(N)]
-    elif dispositivo == "gpu" & tipo == "gemm":
-        comando = ["./gemm_gpu", str(N)]
-    elif dispositivo = "cpu":
-        comando = ["./fft_cpu",str(N)]
-    elif
-        comando = ["./fft_gpu",str(N)]
+    # Lanzar binario (GEMM o FFT)
+    if benchmark_type == 'gemm':
+        if dispositivo == "cpu":
+            comando = ["./gemm_cpu", str(N)]
+        else:
+            comando = ["./gemm_gpu", str(N)]
+    elif benchmark_type == 'fft':
+        if dispositivo == "cpu":
+            comando = ["./fft_cpu", str(N)]
+        else:
+            comando = ["./fft_gpu", str(N)]
     else:
-        raise ValueError("Dispositivo no válido")
+        raise ValueError("Benchmark type invalido")
     
     resultado = subprocess.run(comando, capture_output=True, text=True)
     
@@ -226,7 +217,7 @@ def ejecutar_y_medir(N, dispositivo , tipo):
     # ========================================================================
     match = re.search(r'tiempo=([\d.]+)\s*ms.*GFLOPS=([\d.]+)', resultado.stdout)
     if not match:
-        raise ValueError(f"No se pudo parsear la salida: {resultado.stdout}")
+        raise ValueError("No se pudo parsear la salida: " + resultado.stdout)
     
     tiempo_ms = float(match.group(1))
     tiempo_s = tiempo_ms / 1000.0  # Convertir a segundos
@@ -244,7 +235,6 @@ def ejecutar_y_medir(N, dispositivo , tipo):
         # Si no se capturó potencia, usar valor por defecto
         potencia_promedio = 50.0 if dispositivo == "cpu" else 150.0
         muestras = 0
-        print(f"   ⚠️  Sin datos de potencia (0 muestras), usando valor por defecto: {potencia_promedio}W")
     
     # Energía = Potencia × Tiempo
     energia_joules = potencia_promedio * tiempo_s
@@ -255,19 +245,47 @@ def ejecutar_y_medir(N, dispositivo , tipo):
     return tiempo_ms, energia_joules, edp, potencia_promedio, gflops, muestras
 
 # ============================================================================
-# MAIN: EJECUTAR BENCHMARKS Y GUARDAR DATASET
+# FUNCIONES DE IMPRESIÓN EN TIEMPO REAL
+# ============================================================================
+
+def imprimir_encabezado_tabla():
+    """Imprime el encabezado de la tabla"""
+    print("")
+    print("=" * 120)
+    print("Benchmark       N          Tiempo(ms)      Potencia(W)     Energia(J)      EDP(J*s)        GFLOPS          Muestras")
+    print("-" * 120)
+
+def imprimir_resultado(benchmark, dispositivo, N, tiempo_ms, potencia, energia, edp, gflops, muestras):
+    """Imprime un resultado en la tabla"""
+    label = benchmark.upper() + "_" + dispositivo.upper()
+    print(f"{label:<15} {N:<10} {tiempo_ms:>14.6f} {potencia:>15.2f} {energia:>15.6f} {edp:>15.6f} {gflops:>15.1f} {muestras:>12}")
+
+def imprimir_separador():
+    """Imprime una línea separadora"""
+    print("-" * 120)
+
+def imprimir_cierre():
+    """Imprime el cierre de la tabla"""
+    print("=" * 120)
+    print("")
+
+# ============================================================================
+# MAIN: EJECUTAR BENCHMARKS
 # ============================================================================
 
 if __name__ == "__main__":
-    # Tamaños de matrices a evaluar
-    tamanos_N = [128, 256, 512, 1024, 2048, 4096]
+    # Tamaños de datos
+    tamanos_gemm = [128, 256, 512, 1024, 2048, 4096]
+    tamanos_fft = [2**14, 2**16, 2**18, 2**20, 2**22, 2**24]
     
     # Archivo CSV para guardar resultados
-    csv_file = 'dataset_gemm_edp.csv'
+    csv_file = 'mediciones_unificadas.csv'
     
+    # Crear archivo CSV con encabezado
     with open(csv_file, 'w', newline='') as file:
         writer = csv.writer(file)
         writer.writerow([
+            "Benchmark",
             "Dispositivo", 
             "N", 
             "Tiempo(ms)", 
@@ -277,35 +295,79 @@ if __name__ == "__main__":
             "GFLOPS",
             "Muestras_Potencia"
         ])
-        
-        # ====== BENCHMARKS EN CPU ======
-        print("="*70)
-        print("--- Iniciando Benchmarks en CPU ---")
-        print("="*70)
-        for N in tamanos_N:
-            try:
-                t_ms, e, edp, p_avg, gflops, muestras = ejecutar_y_medir(N, 'cpu')
-                print(f"CPU | N={N:5d} | T:{t_ms:8.3f}ms | P:{p_avg:7.2f}W | E:{e:8.4f}J | EDP:{edp:10.6f} | GFLOPS:{gflops:7.1f} | Muestras:{muestras}")
-                writer.writerow(['cpu', N, t_ms, p_avg, e, edp, gflops, muestras])
-                file.flush()
-                time.sleep(1)  # Pausa para enfriar hardware
-            except Exception as ex:
-                print(f"❌ Error en CPU N={N}: {ex}")
-        
-        # ====== BENCHMARKS EN GPU ======
-        print("\n" + "="*70)
-        print("--- Iniciando Benchmarks en GPU ---")
-        print("="*70)
-        for N in tamanos_N:
-            try:
-                t_ms, e, edp, p_avg, gflops, muestras = ejecutar_y_medir(N, 'gpu')
-                print(f"GPU | N={N:5d} | T:{t_ms:8.3f}ms | P:{p_avg:7.2f}W | E:{e:8.4f}J | EDP:{edp:10.6f} | GFLOPS:{gflops:7.1f} | Muestras:{muestras}")
-                writer.writerow(['gpu', N, t_ms, p_avg, e, edp, gflops, muestras])
-                file.flush()
-                time.sleep(1)
-            except Exception as ex:
-                print(f"❌ Error en GPU N={N}: {ex}")
     
-    print("\n" + "="*70)
-    print(f"✓ Dataset guardado en '{csv_file}'")
-    print("="*70)
+    # Imprimir encabezado de tabla
+    imprimir_encabezado_tabla()
+    
+    # ====== BENCHMARK GEMM ======
+    
+    # GEMM en CPU
+    for N in tamanos_gemm:
+        try:
+            t_ms, energia, edp, potencia, gflops, muestras = ejecutar_y_medir(N, 'cpu', 'gemm')
+            imprimir_resultado('gemm', 'cpu', N, t_ms, potencia, energia, edp, gflops, muestras)
+            
+            # Guardar en CSV
+            with open(csv_file, 'a', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow(['gemm', 'cpu', N, t_ms, potencia, energia, edp, gflops, muestras])
+            
+            time.sleep(1)
+        except Exception as ex:
+            print("Error en GEMM CPU N=" + str(N) + ": " + str(ex))
+    
+    imprimir_separador()
+    
+    # GEMM en GPU
+    for N in tamanos_gemm:
+        try:
+            t_ms, energia, edp, potencia, gflops, muestras = ejecutar_y_medir(N, 'gpu', 'gemm')
+            imprimir_resultado('gemm', 'gpu', N, t_ms, potencia, energia, edp, gflops, muestras)
+            
+            # Guardar en CSV
+            with open(csv_file, 'a', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow(['gemm', 'gpu', N, t_ms, potencia, energia, edp, gflops, muestras])
+            
+            time.sleep(1)
+        except Exception as ex:
+            print("Error en GEMM GPU N=" + str(N) + ": " + str(ex))
+    
+    imprimir_separador()
+    
+    # ====== BENCHMARK FFT ======
+    
+    # FFT en CPU
+    for N in tamanos_fft:
+        try:
+            t_ms, energia, edp, potencia, gflops, muestras = ejecutar_y_medir(N, 'cpu', 'fft')
+            imprimir_resultado('fft', 'cpu', N, t_ms, potencia, energia, edp, gflops, muestras)
+            
+            # Guardar en CSV
+            with open(csv_file, 'a', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow(['fft', 'cpu', N, t_ms, potencia, energia, edp, gflops, muestras])
+            
+            time.sleep(1)
+        except Exception as ex:
+            print("Error en FFT CPU N=" + str(N) + ": " + str(ex))
+    
+    imprimir_separador()
+    
+    # FFT en GPU
+    for N in tamanos_fft:
+        try:
+            t_ms, energia, edp, potencia, gflops, muestras = ejecutar_y_medir(N, 'gpu', 'fft')
+            imprimir_resultado('fft', 'gpu', N, t_ms, potencia, energia, edp, gflops, muestras)
+            
+            # Guardar en CSV
+            with open(csv_file, 'a', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow(['fft', 'gpu', N, t_ms, potencia, energia, edp, gflops, muestras])
+            
+            time.sleep(1)
+        except Exception as ex:
+            print("Error en FFT GPU N=" + str(N) + ": " + str(ex))
+    
+    imprimir_cierre()
+    print("Dataset guardado en: " + csv_file)
