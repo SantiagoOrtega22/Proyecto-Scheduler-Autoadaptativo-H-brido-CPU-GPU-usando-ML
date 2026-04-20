@@ -1,5 +1,5 @@
 // fftw_bench.c
-// Compilar: gcc -O3 -o fftw_bench fftw_bench.c -lfftw3 -lm
+// Compilar: gcc -O3 -o fft_cpu fft_cpu.c -lfftw3 -lm
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,7 +47,7 @@ void benchmark_fft(int N, int warmup, int iters) {
 }
 
 int main(int argc, char** argv) {
-    int sizes[] = {1024, 4096, 16384, 65536, 262144, 1048576};
+    int sizes[] = {4096,16384, 65536, 262144, 1048576};
     int n_sizes = sizeof(sizes) / sizeof(sizes[0]);
     int warmup  = 3;
     int iters   = 10;

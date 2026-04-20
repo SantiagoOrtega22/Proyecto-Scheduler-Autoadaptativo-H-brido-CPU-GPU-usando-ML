@@ -170,7 +170,7 @@ def monitor_energia(dispositivo):
 # FUNCIÓN PRINCIPAL: EJECUTAR BENCHMARK Y MEDIR EDP
 # ============================================================================
 
-def ejecutar_y_medir(N, dispositivo , tipo):
+def ejecutar_y_medir(N, dispositivo):
     """
     Ejecuta el benchmark GEMM y mide:
     - Tiempo de ejecución
@@ -201,14 +201,10 @@ def ejecutar_y_medir(N, dispositivo , tipo):
     start_time = time.time()
     
     # Lanzar binario GEMM (CPU o GPU)
-    if dispositivo == "cpu" & tipo== "gemm":
+    if dispositivo == "cpu":
         comando = ["./gemm_cpu", str(N)]
-    elif dispositivo == "gpu" & tipo == "gemm":
+    elif dispositivo == "gpu":
         comando = ["./gemm_gpu", str(N)]
-    elif dispositivo = "cpu":
-        comando = ["./fft_cpu",str(N)]
-    elif
-        comando = ["./fft_gpu",str(N)]
     else:
         raise ValueError("Dispositivo no válido")
     

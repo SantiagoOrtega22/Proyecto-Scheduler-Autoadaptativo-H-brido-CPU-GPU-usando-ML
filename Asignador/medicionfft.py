@@ -170,7 +170,7 @@ def monitor_energia(dispositivo):
 # FUNCIÓN PRINCIPAL: EJECUTAR BENCHMARK Y MEDIR EDP
 # ============================================================================
 
-def ejecutar_y_medir(N, dispositivo , tipo):
+def ejecutar_y_medir(N, dispositivo):
     """
     Ejecuta el benchmark GEMM y mide:
     - Tiempo de ejecución
@@ -201,14 +201,10 @@ def ejecutar_y_medir(N, dispositivo , tipo):
     start_time = time.time()
     
     # Lanzar binario GEMM (CPU o GPU)
-    if dispositivo == "cpu" & tipo== "gemm":
-        comando = ["./gemm_cpu", str(N)]
-    elif dispositivo == "gpu" & tipo == "gemm":
-        comando = ["./gemm_gpu", str(N)]
-    elif dispositivo = "cpu":
-        comando = ["./fft_cpu",str(N)]
-    elif
-        comando = ["./fft_gpu",str(N)]
+    if dispositivo == "cpu":
+        comando = ["./fft_cpu", str(N)]
+    elif dispositivo == "gpu":
+        comando = ["./fft_gpu", str(N)]
     else:
         raise ValueError("Dispositivo no válido")
     
@@ -260,10 +256,10 @@ def ejecutar_y_medir(N, dispositivo , tipo):
 
 if __name__ == "__main__":
     # Tamaños de matrices a evaluar
-    tamanos_N = [128, 256, 512, 1024, 2048, 4096]
+    tamanos_N = [2**14,2**16,2**18,2**20,2**22,2**24]
     
     # Archivo CSV para guardar resultados
-    csv_file = 'dataset_gemm_edp.csv'
+    csv_file = 'dataset_fft_edp.csv'
     
     with open(csv_file, 'w', newline='') as file:
         writer = csv.writer(file)
