@@ -269,6 +269,10 @@ def imprimir_cierre():
     print("=" * 120)
     print("")
 
+def formatear_decimal(valor, decimales):
+    """Formatea números decimales usando coma como separador."""
+    return f"{valor:.{decimales}f}".replace('.', ',')
+
 # ============================================================================
 # MAIN: EJECUTAR BENCHMARKS
 # ============================================================================
@@ -283,7 +287,7 @@ if __name__ == "__main__":
     
     # Crear archivo CSV con encabezado
     with open(csv_file, 'w', newline='') as file:
-        writer = csv.writer(file)
+        writer = csv.writer(file, delimiter=';')
         writer.writerow([
             "Benchmark",
             "Dispositivo", 
@@ -309,8 +313,18 @@ if __name__ == "__main__":
             
             # Guardar en CSV
             with open(csv_file, 'a', newline='') as file:
-                writer = csv.writer(file)
-                writer.writerow(['gemm', 'cpu', N, t_ms, potencia, energia, edp, gflops, muestras])
+                writer = csv.writer(file, delimiter=';')
+                writer.writerow([
+                    'gemm',
+                    'cpu',
+                    N,
+                    formatear_decimal(t_ms, 6),
+                    formatear_decimal(potencia, 2),
+                    formatear_decimal(energia, 6),
+                    formatear_decimal(edp, 6),
+                    formatear_decimal(gflops, 1),
+                    muestras
+                ])
             
             time.sleep(1)
         except Exception as ex:
@@ -326,8 +340,18 @@ if __name__ == "__main__":
             
             # Guardar en CSV
             with open(csv_file, 'a', newline='') as file:
-                writer = csv.writer(file)
-                writer.writerow(['gemm', 'gpu', N, t_ms, potencia, energia, edp, gflops, muestras])
+                writer = csv.writer(file, delimiter=';')
+                writer.writerow([
+                    'gemm',
+                    'gpu',
+                    N,
+                    formatear_decimal(t_ms, 6),
+                    formatear_decimal(potencia, 2),
+                    formatear_decimal(energia, 6),
+                    formatear_decimal(edp, 6),
+                    formatear_decimal(gflops, 1),
+                    muestras
+                ])
             
             time.sleep(1)
         except Exception as ex:
@@ -345,8 +369,18 @@ if __name__ == "__main__":
             
             # Guardar en CSV
             with open(csv_file, 'a', newline='') as file:
-                writer = csv.writer(file)
-                writer.writerow(['fft', 'cpu', N, t_ms, potencia, energia, edp, gflops, muestras])
+                writer = csv.writer(file, delimiter=';')
+                writer.writerow([
+                    'fft',
+                    'cpu',
+                    N,
+                    formatear_decimal(t_ms, 6),
+                    formatear_decimal(potencia, 2),
+                    formatear_decimal(energia, 6),
+                    formatear_decimal(edp, 6),
+                    formatear_decimal(gflops, 1),
+                    muestras
+                ])
             
             time.sleep(1)
         except Exception as ex:
@@ -362,8 +396,18 @@ if __name__ == "__main__":
             
             # Guardar en CSV
             with open(csv_file, 'a', newline='') as file:
-                writer = csv.writer(file)
-                writer.writerow(['fft', 'gpu', N, t_ms, potencia, energia, edp, gflops, muestras])
+                writer = csv.writer(file, delimiter=';')
+                writer.writerow([
+                    'fft',
+                    'gpu',
+                    N,
+                    formatear_decimal(t_ms, 6),
+                    formatear_decimal(potencia, 2),
+                    formatear_decimal(energia, 6),
+                    formatear_decimal(edp, 6),
+                    formatear_decimal(gflops, 1),
+                    muestras
+                ])
             
             time.sleep(1)
         except Exception as ex:
