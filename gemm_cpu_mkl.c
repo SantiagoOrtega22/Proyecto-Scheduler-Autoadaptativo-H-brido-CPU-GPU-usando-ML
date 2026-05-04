@@ -70,23 +70,27 @@
 #include <complex.h>
 
 static double get_time_sec(void) {
+    // Temporizador monotónico para medir la duracion del benchmark sin saltos.
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec + ts.tv_nsec * 1e-9;
 }
 
 static CBLAS_TRANSPOSE parse_op(char c) {
+    // Traduce la letra del CLI a la operacion BLAS correspondiente.
     if (c == 'T' || c == 't') return CblasTrans;
     if (c == 'C' || c == 'c') return CblasConjTrans;
     return CblasNoTrans;
 }
 
 int run_sgemm(int M, int N, int K, CBLAS_TRANSPOSE transA, CBLAS_TRANSPOSE transB, int warmup, int iters, double *out_time_sec) {
+    // Reserva memoria y prepara la variante de precision simple.
     float *A = malloc((size_t)M * K * sizeof(float));
     float *B = malloc((size_t)K * N * sizeof(float));
     float *C = malloc((size_t)M * N * sizeof(float));
     if (!A || !B || !C) return -1;
 
+    // Inicializa operandos con datos pseudoaleatorios y limpia la matriz destino.
     for (size_t i = 0; i < (size_t)M * K; ++i) A[i] = (float)rand() / RAND_MAX;
     for (size_t i = 0; i < (size_t)K * N; ++i) B[i] = (float)rand() / RAND_MAX;
     for (size_t i = 0; i < (size_t)M * N; ++i) C[i] = 0.0f;
@@ -94,10 +98,12 @@ int run_sgemm(int M, int N, int K, CBLAS_TRANSPOSE transA, CBLAS_TRANSPOSE trans
     const float alpha = 1.0f, beta = 0.0f;
     int lda = K, ldb = N, ldc = N;
 
+    // Warm-up para estabilizar caches y ruta interna de la biblioteca BLAS.
     for (int i = 0; i < warmup; ++i) {
         cblas_sgemm(CblasRowMajor, transA, transB, M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
     }
 
+    // Mide el tiempo promedio de varias iteraciones del kernel GEMM.
     double t0 = get_time_sec();
     for (int i = 0; i < iters; ++i) {
         cblas_sgemm(CblasRowMajor, transA, transB, M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
@@ -105,16 +111,19 @@ int run_sgemm(int M, int N, int K, CBLAS_TRANSPOSE transA, CBLAS_TRANSPOSE trans
     double t1 = get_time_sec();
     *out_time_sec = (t1 - t0) / iters;
 
+    // Libera recursos al finalizar el caso.
     free(A); free(B); free(C);
     return 0;
 }
 
 int run_dgemm(int M, int N, int K, CBLAS_TRANSPOSE transA, CBLAS_TRANSPOSE transB, int warmup, int iters, double *out_time_sec) {
+    // Reserva memoria y prepara la variante de precision doble.
     double *A = malloc((size_t)M * K * sizeof(double));
     double *B = malloc((size_t)K * N * sizeof(double));
     double *C = malloc((size_t)M * N * sizeof(double));
     if (!A || !B || !C) return -1;
 
+    // Inicializa operandos y matriz salida.
     for (size_t i = 0; i < (size_t)M * K; ++i) A[i] = (double)rand() / RAND_MAX;
     for (size_t i = 0; i < (size_t)K * N; ++i) B[i] = (double)rand() / RAND_MAX;
     for (size_t i = 0; i < (size_t)M * N; ++i) C[i] = 0.0;
@@ -122,6 +131,7 @@ int run_dgemm(int M, int N, int K, CBLAS_TRANSPOSE transA, CBLAS_TRANSPOSE trans
     const double alpha = 1.0, beta = 0.0;
     int lda = K, ldb = N, ldc = N;
 
+    // Warm-up y medicion real del kernel GEMM.
     for (int i = 0; i < warmup; ++i) {
         cblas_dgemm(CblasRowMajor, transA, transB, M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
     }
@@ -133,16 +143,19 @@ int run_dgemm(int M, int N, int K, CBLAS_TRANSPOSE transA, CBLAS_TRANSPOSE trans
     double t1 = get_time_sec();
     *out_time_sec = (t1 - t0) / iters;
 
+    // Liberacion final de buffers.
     free(A); free(B); free(C);
     return 0;
 }
 
 int run_cgemm(int M, int N, int K, CBLAS_TRANSPOSE transA, CBLAS_TRANSPOSE transB, int warmup, int iters, double *out_time_sec) {
+    // Reserva memoria para la variante compleja simple.
     float complex *A = malloc((size_t)M * K * sizeof(float complex));
     float complex *B = malloc((size_t)K * N * sizeof(float complex));
     float complex *C = malloc((size_t)M * N * sizeof(float complex));
     if (!A || !B || !C) return -1;
 
+    // Genera datos complejos pseudoaleatorios para A y B.
     for (size_t i = 0; i < (size_t)M * K; ++i) A[i] = (float)rand() / RAND_MAX + (float)rand() / RAND_MAX * I;
     for (size_t i = 0; i < (size_t)K * N; ++i) B[i] = (float)rand() / RAND_MAX + (float)rand() / RAND_MAX * I;
     for (size_t i = 0; i < (size_t)M * N; ++i) C[i] = 0.0f + 0.0f * I;
@@ -151,6 +164,7 @@ int run_cgemm(int M, int N, int K, CBLAS_TRANSPOSE transA, CBLAS_TRANSPOSE trans
     float complex beta = 0.0f + 0.0f * I;
     int lda = K, ldb = N, ldc = N;
 
+    // Ejecuta warm-up antes de medir el tiempo medio.
     for (int i = 0; i < warmup; ++i) {
         cblas_cgemm(CblasRowMajor, transA, transB, M, N, K, &alpha, A, lda, B, ldb, &beta, C, ldc);
     }
@@ -162,16 +176,19 @@ int run_cgemm(int M, int N, int K, CBLAS_TRANSPOSE transA, CBLAS_TRANSPOSE trans
     double t1 = get_time_sec();
     *out_time_sec = (t1 - t0) / iters;
 
+    // Libera memoria temporal de la rutina compleja simple.
     free(A); free(B); free(C);
     return 0;
 }
 
 int run_zgemm(int M, int N, int K, CBLAS_TRANSPOSE transA, CBLAS_TRANSPOSE transB, int warmup, int iters, double *out_time_sec) {
+    // Reserva memoria para la variante compleja doble.
     double complex *A = malloc((size_t)M * K * sizeof(double complex));
     double complex *B = malloc((size_t)K * N * sizeof(double complex));
     double complex *C = malloc((size_t)M * N * sizeof(double complex));
     if (!A || !B || !C) return -1;
 
+    // Inicializa operandos complejos con parte real e imaginaria aleatorias.
     for (size_t i = 0; i < (size_t)M * K; ++i) A[i] = (double)rand() / RAND_MAX + (double)rand() / RAND_MAX * I;
     for (size_t i = 0; i < (size_t)K * N; ++i) B[i] = (double)rand() / RAND_MAX + (double)rand() / RAND_MAX * I;
     for (size_t i = 0; i < (size_t)M * N; ++i) C[i] = 0.0 + 0.0 * I;
@@ -180,6 +197,7 @@ int run_zgemm(int M, int N, int K, CBLAS_TRANSPOSE transA, CBLAS_TRANSPOSE trans
     double complex beta = 0.0 + 0.0 * I;
     int lda = K, ldb = N, ldc = N;
 
+    // Warm-up previo a la ventana de medicion.
     for (int i = 0; i < warmup; ++i) {
         cblas_zgemm(CblasRowMajor, transA, transB, M, N, K, &alpha, A, lda, B, ldb, &beta, C, ldc);
     }
@@ -191,20 +209,24 @@ int run_zgemm(int M, int N, int K, CBLAS_TRANSPOSE transA, CBLAS_TRANSPOSE trans
     double t1 = get_time_sec();
     *out_time_sec = (t1 - t0) / iters;
 
+    // Limpieza de buffers al terminar la ejecucion.
     free(A); free(B); free(C);
     return 0;
 }
 
 int main(int argc, char **argv) {
+    // Configuracion por defecto: algunas iteraciones de warm-up y medicion.
     int warmup = 3;
     int iters = 10;
 
+    // Valida que la linea de comandos tenga los parametros minimos.
     if (argc < 5) {
         fprintf(stderr, "Usage: %s M N K <S|D|C|Z> [OpA] [OpB]\n", argv[0]);
         fprintf(stderr, "Example: %s 512 512 512 S N N\n", argv[0]);
         return 1;
     }
 
+    // Parseo de dimensiones, precision y opciones de transposicion.
     int M = atoi(argv[1]);
     int N = atoi(argv[2]);
     int K = atoi(argv[3]);
@@ -217,6 +239,7 @@ int main(int argc, char **argv) {
     CBLAS_TRANSPOSE tA = parse_op(opA);
     CBLAS_TRANSPOSE tB = parse_op(opB);
 
+    // Despacha a la rutina especifica segun la precision solicitada.
     double time_sec = 0.0;
     int rc = 0;
 
@@ -235,6 +258,7 @@ int main(int argc, char **argv) {
         return 3;
     }
 
+    // Salida unica y estable para que el runner la pueda parsear.
     printf("M=%d N=%d K=%d Precision=%c OpA=%c OpB=%c Time_sec=%.9f\n", M, N, K, prec, opA, opB, time_sec);
     return 0;
 }
