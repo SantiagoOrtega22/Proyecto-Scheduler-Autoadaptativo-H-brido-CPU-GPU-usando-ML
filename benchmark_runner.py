@@ -1,58 +1,69 @@
 #!/usr/bin/env python3
 """
-BENCHMARK RUNNER - Orquestador para ejecutar barridos de parametros GEMM.
+benchmark_runner.py
 
-USO:
-    # Barrido baseline (matrices cuadradas M=N=K, tamanos 128-4096, precisiones S/D/C/Z, operaciones N,N)
-  python3 benchmark_runner.py
-  
-  # Barrido completo con transposiciones (N/T/C en ambas matrices)
-  python3 benchmark_runner.py --sweep-transpose --op-a-list N,T --op-b-list N,T
+Orquestador de benchmarking GEMM para CPU o GPU.
 
-    # Barrido completo de dimensiones (M, N y K independientes)
+GUIA DE USO
+-----------
+Modo GPU (usa el binario CUDA `GEMMparametros`):
+    python3 benchmark_runner.py --device gpu --binary ./GEMMparametros
+
+Modo CPU (usa `gemm_cpu_mkl` u otro binario BLAS compatible):
+    python3 benchmark_runner.py --device cpu --binary ./gemm_cpu_mkl
+
+Barrido rapido de prueba:
+    python3 benchmark_runner.py --device cpu --binary ./gemm_cpu_mkl --sizes 128 --precisions S --output cpu_results.csv
+
+Barrido cuadrado por defecto (M=N=K):
+    python3 benchmark_runner.py --device gpu
+
+Barrido completo de dimensiones (M, N y K independientes):
     python3 benchmark_runner.py --full-dim-sweep
-  
-  # Barrido parcial personalizado
-  python3 benchmark_runner.py --sizes 256,512,1024 --precisions D,C --op-a-list N,T --op-b-list N
-  
-  # Especificar ruta del binario y GPU
-  python3 benchmark_runner.py --binary ./GEMMparametros --gpu-index 0 --output mi_resultado.csv
 
-OPCIONES:
-  --binary            Ruta al binario compilado GEMMparametros (default: ./GEMMparametros)
-  --sizes             Lista de tamanos separados por coma, ej: 128,256,512 (default: 128-4096 escala 2x)
-  --precisions        Precisiones a probar: S/D/C/Z (default: S,D,C,Z)
-    --full-dim-sweep    Activa el barrido completo MxNxK (default: solo M=N=K)
-  --op-a-list         Operaciones en matriz A: N/T/C (default: N, ignorado si --sweep-transpose omitido)
-  --op-b-list         Operaciones en matriz B: N/T/C (default: N, ignorado si --sweep-transpose omitido)
-  --sweep-transpose   Activar barrido de transposiciones (default: desactivado)
-  --gpu-index         Indice de GPU a usar (default: 0)
-  --output            Archivo CSV de salida (default: benchmark_results.csv)
-  --timeout           Segundos maximos por caso (default: 300)
+Barrido con transposiciones en A y B:
+    python3 benchmark_runner.py --sweep-transpose --op-a-list N,T,C --op-b-list N,T,C
 
-SALIDA CSV:
-  Columnas: M, N, K, Precision, OpA, OpB, Time_sec, GFLOPS, Avg_Power_W, Energy_J, EDP
-  - Time_sec:  Tiempo de ejecucion (segundos)
-  - GFLOPS:    Operaciones en punto flotante / segundo / 1e9
-  - Avg_Power_W: Potencia GPU promedio durante GEMM (Watts)
-  - Energy_J:  Energia consumida = Potencia × Tiempo (Joules)
-  - EDP:       Energy-Delay Product = Energia × Tiempo
+OPCIONES PRINCIPALES
+--------------------
+    --device            Dispositivo donde correr el benchmark: gpu o cpu
+    --binary            Ruta al binario a ejecutar
+    --sizes             Lista separada por coma para los tamanos base
+    --precisions        Precisiones a probar: S, D, C, Z
+    --full-dim-sweep    Activa combinacion completa de M x N x K
+    --sweep-transpose   Activa barrido de OpA / OpB
+    --op-a-list         Operaciones posibles para la matriz A: N, T, C
+    --op-b-list         Operaciones posibles para la matriz B: N, T, C
+    --gpu-index         Indice de GPU para NVML cuando device=gpu
+    --output            Archivo CSV de salida
+    --timeout           Timeout por caso en segundos
 
-EJEMPLOS:
-    # Barrido rapido: solo matrices 256x256x256, precision D
-  python3 benchmark_runner.py --sizes 256 --precisions D
-  
-  # Barrido con transposiciones solo en OpA
-  python3 benchmark_runner.py --sweep-transpose --op-a-list N,T --op-b-list N
-  
-    # Todo (completo): 6 tamanos × 4 precisiones × 9 ops = 216 casos cuadrados+ops
-  python3 benchmark_runner.py --sweep-transpose --op-a-list N,T,C --op-b-list N,T,C
+SALIDA CSV
+----------
+Columnas generadas:
+    M, N, K, Precision, OpA, OpB, Time_sec, GFLOPS, Avg_Power_W, Energy_J, EDP
+
+Interpretacion:
+    Time_sec     -> tiempo medido por el binario
+    GFLOPS       -> rendimiento calculado a partir de M, N, K y la precision
+    Avg_Power_W  -> potencia media estimada durante el caso
+    Energy_J     -> energia consumida durante el caso
+    EDP          -> Energy-Delay Product
+
+NOTAS
+-----
+    - En GPU, la potencia se lee con NVML.
+    - En CPU, se intenta leer RAPL desde /sys/class/powercap.
+    - Si RAPL no esta disponible, el runner sigue y deja potencia/energia en 0.0.
+    - La salida del binario debe incluir una linea con `Time_sec=...`.
 """
 
 import argparse
 import csv
 import itertools
 import queue
+import os
+import sys
 import re
 import subprocess
 import threading
@@ -100,34 +111,121 @@ def parse_ops(raw):
     return values
 
 
-def monitor_power(handle, stop_event, power_queue):
-    # Hilo de monitoreo: muestrea potencia NVML en bucle hasta recibir la senal de parada.
+def monitor_power_gpu(handle, stop_event, power_queue):
+    # Hilo de monitoreo NVML: muestrea potencia en mW y la guarda como W.
     samples = []
     while not stop_event.is_set():
         timestamp = time.perf_counter()
-        power_mw = pynvml.nvmlDeviceGetPowerUsage(handle)
-        samples.append((timestamp, power_mw / 1000.0))
+        try:
+            power_mw = pynvml.nvmlDeviceGetPowerUsage(handle)
+            samples.append((timestamp, power_mw / 1000.0))
+        except Exception:
+            # En caso de fallo NVML, seguir intentando hasta stop_event
+            pass
     power_queue.put(samples)
 
 
-def run_single_case(binary, gpu_index, m, n, k, precision, op_a, op_b, timeout):
+def monitor_power_cpu(energy_path, stop_event, power_queue):
+    # Monitor RAPL via sysfs: lee energy_uj al inicio y al final.
+    def read_energy_uj(path):
+        with open(path, "r") as f:
+            return int(f.read().strip())
+
+    try:
+        t0 = time.perf_counter()
+        e0 = read_energy_uj(energy_path)
+    except Exception:
+        power_queue.put([])
+        return
+
+    # Espera a la senal de parada
+    stop_event.wait()
+
+    try:
+        t1 = time.perf_counter()
+        e1 = read_energy_uj(energy_path)
+    except Exception:
+        power_queue.put([])
+        return
+
+    # Guardamos dos muestras (ts, energy_J) en lugar de potencia instantanea.
+    samples = [(t0, e0 / 1e6), (t1, e1 / 1e6)]
+    power_queue.put(samples)
+
+
+def find_rapl_energy_path():
+    # Busca energy_uj sin recorrer recursivamente todo powercap; así evitamos bloqueos.
+    base_dir = "/sys/class/powercap"
+    if not os.path.isdir(base_dir):
+        return None
+
+    def is_readable_energy(path):
+        return os.path.isfile(path) and os.access(path, os.R_OK)
+
+    try:
+        with os.scandir(base_dir) as entries:
+            for entry in entries:
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+                if not entry.name.startswith("intel-rapl"):
+                    continue
+
+                direct_energy = os.path.join(base_dir, entry.name, "energy_uj")
+                if is_readable_energy(direct_energy):
+                    return direct_energy
+
+                try:
+                    with os.scandir(os.path.join(base_dir, entry.name)) as child_entries:
+                        for child in child_entries:
+                            if not child.is_dir(follow_symlinks=False):
+                                continue
+                            nested_energy = os.path.join(base_dir, entry.name, child.name, "energy_uj")
+                            if is_readable_energy(nested_energy):
+                                return nested_energy
+                except OSError:
+                    continue
+    except OSError:
+        return None
+
+    return None
+
+
+def run_single_case(binary, device, gpu_index, m, n, k, precision, op_a, op_b, timeout):
     # Ejecuta un unico experimento (M,N,K,precision) y toma potencia en paralelo.
-    handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
     cmd = [binary, str(m), str(n), str(k), precision, op_a, op_b]
 
     power_queue = queue.Queue(maxsize=1)
     stop_event = threading.Event()
-    monitor_thread = threading.Thread(
-        target=monitor_power,
-        args=(handle, stop_event, power_queue),
-        daemon=True,
-    )
 
-    monitor_thread.start()
-    start = time.perf_counter()
+    monitor_thread = None
+    start_wall = time.perf_counter()
+
+    if device == "gpu":
+        handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
+        monitor_thread = threading.Thread(
+            target=monitor_power_gpu,
+            args=(handle, stop_event, power_queue),
+            daemon=True,
+        )
+    else:
+        rapl = find_rapl_energy_path()
+        if rapl:
+            monitor_thread = threading.Thread(
+                target=monitor_power_cpu,
+                args=(rapl, stop_event, power_queue),
+                daemon=True,
+            )
+        else:
+            print(
+                "Aviso: no se encontro energy_uj RAPL en /sys/class/powercap; "
+                "se registrara Avg_Power_W/Energy_J/EDP como 0.0 para CPU.",
+                file=sys.stderr,
+            )
+
+    if monitor_thread is not None:
+        monitor_thread.start()
 
     try:
-        # Lanza el binario CUDA y captura stdout para extraer Time_sec.
         proc = subprocess.run(
             cmd,
             capture_output=True,
@@ -137,14 +235,15 @@ def run_single_case(binary, gpu_index, m, n, k, precision, op_a, op_b, timeout):
         )
     finally:
         stop_event.set()
-        monitor_thread.join()
+        if monitor_thread is not None:
+            monitor_thread.join()
 
-    end = time.perf_counter()
+    end_wall = time.perf_counter()
     samples = power_queue.get() if not power_queue.empty() else []
 
     if proc.returncode != 0:
         raise RuntimeError(
-            "Fallo en binario CUDA para "
+            "Fallo en binario para "
             f"M={m}, N={n}, K={k}, P={precision}, OpA={op_a}, OpB={op_b}.\n"
             f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
         )
@@ -162,8 +261,24 @@ def run_single_case(binary, gpu_index, m, n, k, precision, op_a, op_b, timeout):
             f"Time_sec invalido ({time_sec}) para M={m},N={n},K={k},P={precision},OpA={op_a},OpB={op_b}"
         )
 
-    # Potencia promedio durante la ejecucion medida.
-    avg_power_w = sum(p for _, p in samples) / len(samples) if samples else 0.0
+    # Calcula potencia y energia dependiendo del dispositivo
+    avg_power_w = 0.0
+    energy_j = 0.0
+
+    if device == "gpu":
+        # Promedio de muestras NVML (W)
+        avg_power_w = sum(p for _, p in samples) / len(samples) if samples else 0.0
+        energy_j = avg_power_w * time_sec
+    else:
+        # samples = [(t0, e0_J), (t1, e1_J)]
+        if len(samples) >= 2:
+            e0 = samples[0][1]
+            e1 = samples[1][1]
+            energy_j = max(0.0, e1 - e0)
+            avg_power_w = energy_j / time_sec if time_sec > 0 else 0.0
+        else:
+            avg_power_w = 0.0
+            energy_j = 0.0
 
     # FLOPs teoricos por tipo: complejos ~8MNK, reales ~2MNK.
     if precision in {"C", "Z"}:
@@ -171,9 +286,7 @@ def run_single_case(binary, gpu_index, m, n, k, precision, op_a, op_b, timeout):
     else:
         ops = 2.0 * m * n * k
 
-    # Metricas derivadas para rendimiento y eficiencia energetica.
     gflops = (ops / time_sec) / 1e9
-    energy_j = avg_power_w * time_sec
     edp = energy_j * time_sec
 
     return {
@@ -189,7 +302,7 @@ def run_single_case(binary, gpu_index, m, n, k, precision, op_a, op_b, timeout):
         "Energy_J": energy_j,
         "EDP": edp,
         "Power_Samples": len(samples),
-        "Wall_Elapsed_sec": end - start,
+        "Wall_Elapsed_sec": end_wall - start_wall,
     }
 
 
@@ -199,6 +312,7 @@ def main():
         description="Orquestador GEMM cuBLAS con monitoreo de potencia NVML"
     )
     parser.add_argument("--binary", default="./GEMMparametros", help="Ruta al binario CUDA")
+    parser.add_argument("--device", choices=["gpu", "cpu"], default="gpu", help="Dispositivo donde ejecutar el benchmark (gpu|cpu)")
     parser.add_argument(
         "--sizes",
         default="128,256,512,1024,2048,4096",
@@ -255,15 +369,21 @@ def main():
         op_a_list = ["N"]
         op_b_list = ["N"]
 
-    pynvml.nvmlInit()
-    try:
-        # Verifica que la GPU solicitada exista en el sistema.
-        device_count = pynvml.nvmlDeviceGetCount()
-        if args.gpu_index < 0 or args.gpu_index >= device_count:
-            raise RuntimeError(
-                f"gpu-index invalido: {args.gpu_index}. GPUs disponibles: {device_count}"
-            )
+    # Inicializaciones por dispositivo
+    if args.device == "gpu":
+        pynvml.nvmlInit()
+        try:
+            # Verifica que la GPU solicitada exista en el sistema.
+            device_count = pynvml.nvmlDeviceGetCount()
+            if args.gpu_index < 0 or args.gpu_index >= device_count:
+                raise RuntimeError(
+                    f"gpu-index invalido: {args.gpu_index}. GPUs disponibles: {device_count}"
+                )
+        except Exception:
+            pynvml.nvmlShutdown()
+            raise
 
+    try:
         fieldnames = [
             "M",
             "N",
@@ -296,6 +416,7 @@ def main():
                     done += 1
                     result = run_single_case(
                         args.binary,
+                        args.device,
                         args.gpu_index,
                         m,
                         n,
@@ -319,7 +440,8 @@ def main():
 
         print(f"\nResultados guardados en: {args.output}")
     finally:
-        pynvml.nvmlShutdown()
+        if args.device == "gpu":
+            pynvml.nvmlShutdown()
 
 
 if __name__ == "__main__":
