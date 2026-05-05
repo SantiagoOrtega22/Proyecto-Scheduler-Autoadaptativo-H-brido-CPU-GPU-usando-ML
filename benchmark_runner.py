@@ -1059,7 +1059,7 @@ def main():
     )
     parser.add_argument(
         "--fft-sizes-1d",
-        default="16384,65536,262144,1048576,4194304,16777216",
+        default="512,1024,2048,4096,8192,16384,3072,5120,6144,10240",
         help="Lista de tamanos 1D FFT (ej: 512,1024)",
     )
     parser.add_argument(
