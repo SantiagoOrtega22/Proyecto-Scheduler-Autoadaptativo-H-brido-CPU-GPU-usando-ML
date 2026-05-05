@@ -20,6 +20,7 @@ typedef struct {
     char domain[4];
     char direction;
     char layout;
+    char plan;
 } FftConfig;
 
 static double get_time_ms() {
@@ -142,6 +143,7 @@ static void benchmark_fft_double(const FftConfig *cfg) {
     int warmup = cfg->warmup > 0 ? cfg->warmup : 1;
     int iters = cfg->iters > 0 ? cfg->iters : 1;
     int sign = (cfg->direction == 'I') ? FFTW_BACKWARD : FFTW_FORWARD;
+    int plan_flags = (cfg->plan == 'E') ? FFTW_ESTIMATE : FFTW_MEASURE;
 
     double sum_log2 = sum_log2_dims(rank, dims);
     double flops = (strcmp(cfg->domain, "C2C") == 0 ? 5.0 : 2.5) * (double)nreal * sum_log2;
@@ -162,7 +164,7 @@ static void benchmark_fft_double(const FftConfig *cfg) {
         plan = fftw_plan_many_dft(rank, dims, cfg->batch,
                                   in, NULL, 1, (int)nreal,
                                   out, NULL, 1, (int)nreal,
-                                  sign, FFTW_MEASURE);
+                      sign, plan_flags);
 
         for (int i = 0; i < warmup; ++i) {
             fftw_execute(plan);
@@ -223,7 +225,7 @@ static void benchmark_fft_double(const FftConfig *cfg) {
         plan = fftw_plan_many_dft_r2c(rank, dims, cfg->batch,
                                       in, inembed_ptr, 1, idist,
                                       out, onembed_ptr, 1, odist,
-                                      FFTW_MEASURE);
+                          plan_flags);
 
         for (int i = 0; i < warmup; ++i) {
             fftw_execute(plan);
@@ -284,7 +286,7 @@ static void benchmark_fft_double(const FftConfig *cfg) {
         plan = fftw_plan_many_dft_c2r(rank, dims, cfg->batch,
                                       in, inembed_ptr, 1, idist,
                                       out, onembed_ptr, 1, odist,
-                                      FFTW_MEASURE);
+                          plan_flags);
 
         for (int i = 0; i < warmup; ++i) {
             fftw_execute(plan);
@@ -322,6 +324,7 @@ static void benchmark_fft_float(const FftConfig *cfg) {
     int warmup = cfg->warmup > 0 ? cfg->warmup : 1;
     int iters = cfg->iters > 0 ? cfg->iters : 1;
     int sign = (cfg->direction == 'I') ? FFTW_BACKWARD : FFTW_FORWARD;
+    int plan_flags = (cfg->plan == 'E') ? FFTW_ESTIMATE : FFTW_MEASURE;
 
     double sum_log2 = sum_log2_dims(rank, dims);
     double flops = (strcmp(cfg->domain, "C2C") == 0 ? 5.0 : 2.5) * (double)nreal * sum_log2;
@@ -342,7 +345,7 @@ static void benchmark_fft_float(const FftConfig *cfg) {
         plan = fftwf_plan_many_dft(rank, dims, cfg->batch,
                                    in, NULL, 1, (int)nreal,
                                    out, NULL, 1, (int)nreal,
-                                   sign, FFTW_MEASURE);
+                       sign, plan_flags);
 
         for (int i = 0; i < warmup; ++i) {
             fftwf_execute(plan);
@@ -403,7 +406,7 @@ static void benchmark_fft_float(const FftConfig *cfg) {
         plan = fftwf_plan_many_dft_r2c(rank, dims, cfg->batch,
                                        in, inembed_ptr, 1, idist,
                                        out, onembed_ptr, 1, odist,
-                                       FFTW_MEASURE);
+                           plan_flags);
 
         for (int i = 0; i < warmup; ++i) {
             fftwf_execute(plan);
@@ -464,7 +467,7 @@ static void benchmark_fft_float(const FftConfig *cfg) {
         plan = fftwf_plan_many_dft_c2r(rank, dims, cfg->batch,
                                        in, inembed_ptr, 1, idist,
                                        out, onembed_ptr, 1, odist,
-                                       FFTW_MEASURE);
+                           plan_flags);
 
         for (int i = 0; i < warmup; ++i) {
             fftwf_execute(plan);
@@ -501,6 +504,7 @@ static int parse_config(int argc, char **argv, FftConfig *cfg) {
     cfg->domain[sizeof(cfg->domain) - 1] = '\0';
     cfg->direction = 'F';
     cfg->layout = 'O';
+    cfg->plan = 'M';
 
     if (argc == 2) {
         cfg->nx = atoi(argv[1]);
@@ -527,11 +531,15 @@ static int parse_config(int argc, char **argv, FftConfig *cfg) {
     if (argc >= 11) {
         cfg->iters = atoi(argv[10]);
     }
+    if (argc >= 12) {
+        cfg->plan = argv[11][0];
+    }
 
     upper_string(cfg->domain);
     cfg->precision = (char)toupper((unsigned char)cfg->precision);
     cfg->direction = (char)toupper((unsigned char)cfg->direction);
     cfg->layout = (char)toupper((unsigned char)cfg->layout);
+    cfg->plan = (char)toupper((unsigned char)cfg->plan);
 
     return 0;
 }
@@ -539,9 +547,9 @@ static int parse_config(int argc, char **argv, FftConfig *cfg) {
 static void print_usage(const char *prog) {
     printf("Uso:\n");
     printf("  %s N\n", prog);
-    printf("  %s Nx Ny Nz Batch Precision Domain Direction Layout [Warmup] [Iters]\n", prog);
+    printf("  %s Nx Ny Nz Batch Precision Domain Direction Layout [Warmup] [Iters] [Plan]\n", prog);
     printf("\nEjemplo:\n");
-    printf("  %s 1024 0 0 4 S C2C F I\n", prog);
+    printf("  %s 1024 0 0 4 S C2C F I 3 10 E\n", prog);
 }
 
 int main(int argc, char **argv) {

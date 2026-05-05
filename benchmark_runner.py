@@ -304,6 +304,18 @@ def monitor_power_gpu(handle, stop_event, power_queue):
     except Exception:
         max_limit_mw = None
 
+    if max_limit_mw is None:
+        try:
+            max_limit_mw = int(pynvml.nvmlDeviceGetPowerManagementLimit(handle))
+        except Exception:
+            max_limit_mw = None
+
+    if max_limit_mw is None:
+        try:
+            max_limit_mw = int(pynvml.nvmlDeviceGetEnforcedPowerLimit(handle))
+        except Exception:
+            max_limit_mw = None
+
     raw_samples = []
     while True:
         timestamp = time.perf_counter()
@@ -370,8 +382,16 @@ def monitor_power_gpu(handle, stop_event, power_queue):
                 file=sys.stderr,
             )
     else:
-        # Sin límites disponibles, seguimos con el comportamiento estándar de NVML: mW->W.
-        divisor = 1000.0
+        # Sin límites disponibles, inferimos escala con un umbral simple.
+        if median_raw >= 1e6:
+            divisor = 1e6
+            print(
+                f"Aviso: no se pudo leer limite de potencia NVML; "
+                f"mediana_raw={median_raw} sugiere uW. Usando divisor 1e6.",
+                file=sys.stderr,
+            )
+        else:
+            divisor = 1000.0
 
     # Convertir todas las muestras a Watts
     samples = [(t, v / divisor) for (t, v) in raw_samples]
@@ -629,6 +649,7 @@ def run_single_case_fft(
     domain,
     direction,
     layout,
+    plan,
     warmup,
     iters,
     timeout,
@@ -648,6 +669,8 @@ def run_single_case_fft(
         cmd.append(str(warmup))
     if iters is not None:
         cmd.append(str(iters))
+    if plan is not None:
+        cmd.append(plan)
 
     power_queue = queue.Queue(maxsize=1)
     stop_event = threading.Event()
@@ -1073,6 +1096,12 @@ def main():
         "--fft-layouts",
         default="I,O",
         help="Lista de layouts FFT: I,O",
+    )
+    parser.add_argument(
+        "--fft-plan",
+        choices=["E", "M"],
+        default="E",
+        help="Plan FFT: E=ESTIMATE, M=MEASURE",
     )
     parser.add_argument(
         "--fft-warmup",

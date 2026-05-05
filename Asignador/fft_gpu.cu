@@ -28,6 +28,7 @@ typedef struct {
     char domain[4];
     char direction;
     char layout;
+    char plan;
 } FftConfig;
 
 static void upper_string(char *s) {
@@ -589,6 +590,7 @@ static int parse_config(int argc, char **argv, FftConfig *cfg) {
     cfg->domain[sizeof(cfg->domain) - 1] = '\0';
     cfg->direction = 'F';
     cfg->layout = 'O';
+    cfg->plan = 'M';
 
     if (argc == 2) {
         cfg->nx = atoi(argv[1]);
@@ -615,11 +617,15 @@ static int parse_config(int argc, char **argv, FftConfig *cfg) {
     if (argc >= 11) {
         cfg->iters = atoi(argv[10]);
     }
+    if (argc >= 12) {
+        cfg->plan = argv[11][0];
+    }
 
     upper_string(cfg->domain);
     cfg->precision = (char)toupper((unsigned char)cfg->precision);
     cfg->direction = (char)toupper((unsigned char)cfg->direction);
     cfg->layout = (char)toupper((unsigned char)cfg->layout);
+    cfg->plan = (char)toupper((unsigned char)cfg->plan);
 
     return 0;
 }
@@ -627,9 +633,9 @@ static int parse_config(int argc, char **argv, FftConfig *cfg) {
 static void print_usage(const char *prog) {
     printf("Uso:\n");
     printf("  %s N\n", prog);
-    printf("  %s Nx Ny Nz Batch Precision Domain Direction Layout [Warmup] [Iters]\n", prog);
+    printf("  %s Nx Ny Nz Batch Precision Domain Direction Layout [Warmup] [Iters] [Plan]\n", prog);
     printf("\nEjemplo:\n");
-    printf("  %s 1024 0 0 4 S C2C F I\n", prog);
+    printf("  %s 1024 0 0 4 S C2C F I 3 10 E\n", prog);
 }
 
 int main(int argc, char **argv) {
