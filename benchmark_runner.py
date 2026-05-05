@@ -617,7 +617,22 @@ def run_single_case(binary, device, gpu_index, m, n, k, precision, op_a, op_b, t
     }
 
 
-def run_single_case_fft(binary, device, gpu_index, nx, ny, nz, batch, precision, domain, direction, layout, timeout):
+def run_single_case_fft(
+    binary,
+    device,
+    gpu_index,
+    nx,
+    ny,
+    nz,
+    batch,
+    precision,
+    domain,
+    direction,
+    layout,
+    warmup,
+    iters,
+    timeout,
+):
     cmd = [
         binary,
         str(nx),
@@ -629,6 +644,10 @@ def run_single_case_fft(binary, device, gpu_index, nx, ny, nz, batch, precision,
         direction,
         layout,
     ]
+    if warmup is not None:
+        cmd.append(str(warmup))
+    if iters is not None:
+        cmd.append(str(iters))
 
     power_queue = queue.Queue(maxsize=1)
     stop_event = threading.Event()
@@ -699,23 +718,28 @@ def run_single_case_fft(binary, device, gpu_index, nx, ny, nz, batch, precision,
     avg_power_w = 0.0
     energy_j = 0.0
     wall_time = end_wall - start_wall
+    power_window_sec = wall_time
 
     if device == "gpu":
-        avg_power_w = average_power_from_samples(samples)
-        energy_j = avg_power_w * time_sec
+        # En GPU integramos las muestras NVML para obtener energia y potencia media.
+        avg_power_w, energy_j = average_and_energy_from_samples(samples)
+        if samples:
+            power_window_sec = samples[-1][0] - samples[0][0]
     else:
-        # IMPORTANTE: Para CPU, usamos wall_time (tiempo total) en lugar de time_sec (tiempo del FFT),
-        # porque RAPL mide energía durante toda la ejecución del proceso, no solo el kernel.
+        # Para CPU, la energia proviene de RAPL (energy_uj). Usamos el tiempo entre lecturas.
         if len(samples) >= 2:
             e0 = samples[0][1]
             e1 = samples[1][1]
             energy_j = max(0.0, e1 - e0)
-            avg_power_w = energy_j / wall_time if wall_time > 0 else 0.0
+            power_window_sec = samples[-1][0] - samples[0][0]
+            if power_window_sec <= 0.0:
+                power_window_sec = wall_time
+            avg_power_w = energy_j / power_window_sec if power_window_sec > 0 else 0.0
 
     dims = fft_dims(nx, ny, nz)
     ops = fft_flops(dims, domain)
     gflops = (ops / time_sec) / 1e9
-    edp = energy_j * time_sec
+    edp = energy_j * power_window_sec
     payload_bytes = fft_payload_bytes(dims, batch, precision, domain, layout)
     radix_class = fft_radix_class(dims)
 
@@ -915,6 +939,8 @@ def run_fft(args):
                         domain,
                         direction,
                         layout,
+                        args.fft_warmup,
+                        args.fft_iters,
                         args.timeout,
                     )
 
@@ -1047,6 +1073,18 @@ def main():
         "--fft-layouts",
         default="I,O",
         help="Lista de layouts FFT: I,O",
+    )
+    parser.add_argument(
+        "--fft-warmup",
+        type=int,
+        default=3,
+        help="Iteraciones de warmup FFT",
+    )
+    parser.add_argument(
+        "--fft-iters",
+        type=int,
+        default=10,
+        help="Iteraciones medidas FFT",
     )
     parser.add_argument(
         "--cooldown",
