@@ -2,7 +2,7 @@
 """
 benchmark_runner.py
 
-Orquestador de benchmarking GEMM para CPU o GPU.
+Orquestador de benchmarking GEMM/FFT para CPU o GPU.
 
 GUIA DE USO
 -----------
@@ -24,10 +24,18 @@ Barrido completo de dimensiones (M, N y K independientes):
 Barrido con transposiciones en A y B:
     python3 benchmark_runner.py --sweep-transpose --op-a-list N,T,C --op-b-list N,T,C
 
+Modo FFT (CPU+GPU en una sola ejecucion):
+    python3 benchmark_runner.py --benchmark fft --device both
+
+FFT con barrido personalizado:
+    python3 benchmark_runner.py --benchmark fft --device gpu \
+        --fft-sizes-1d 1024,2048 --fft-sizes-2d 64x64 --fft-batches 1,4
+
 OPCIONES PRINCIPALES
 --------------------
-    --device            Dispositivo donde correr el benchmark: gpu o cpu
-    --binary            Ruta al binario a ejecutar
+    --benchmark         Benchmark a ejecutar: gemm o fft
+    --device            Dispositivo donde correr el benchmark: gpu, cpu o both (solo FFT)
+    --binary            Ruta al binario GEMM a ejecutar
     --sizes             Lista separada por coma para los tamanos base
     --precisions        Precisiones a probar: S, D, C, Z
     --full-dim-sweep    Activa combinacion completa de M x N x K
@@ -68,6 +76,7 @@ import re
 import subprocess
 import threading
 import time
+import math
 
 import pynvml
 
@@ -109,6 +118,158 @@ def parse_ops(raw):
     if not values:
         raise ValueError("La lista de operaciones no puede estar vacia")
     return values
+
+
+def parse_int_list(raw, name):
+    values = [x.strip() for x in raw.split(",") if x.strip()]
+    if not values:
+        raise ValueError(f"La lista de {name} no puede estar vacia")
+    parsed = []
+    for v in values:
+        n = int(v)
+        if n <= 0:
+            raise ValueError(f"Valor invalido en {name}: {v}")
+        parsed.append(n)
+    return parsed
+
+
+def parse_fft_precisions(raw):
+    values = [x.strip().upper() for x in raw.split(",") if x.strip()]
+    valid = {"S", "D"}
+    for p in values:
+        if p not in valid:
+            raise ValueError(f"Precision FFT invalida: {p}")
+    if not values:
+        raise ValueError("La lista de precisiones FFT no puede estar vacia")
+    return values
+
+
+def parse_fft_domains(raw):
+    values = [x.strip().upper() for x in raw.split(",") if x.strip()]
+    valid = {"C2C", "R2C", "C2R"}
+    for d in values:
+        if d not in valid:
+            raise ValueError(f"Dominio FFT invalido: {d}")
+    if not values:
+        raise ValueError("La lista de dominios FFT no puede estar vacia")
+    return values
+
+
+def parse_fft_directions(raw):
+    values = [x.strip().upper() for x in raw.split(",") if x.strip()]
+    valid = {"F", "I"}
+    for d in values:
+        if d not in valid:
+            raise ValueError(f"Direccion FFT invalida: {d}")
+    if not values:
+        raise ValueError("La lista de direcciones FFT no puede estar vacia")
+    return values
+
+
+def parse_fft_layouts(raw):
+    values = [x.strip().upper() for x in raw.split(",") if x.strip()]
+    valid = {"I", "O"}
+    for d in values:
+        if d not in valid:
+            raise ValueError(f"Layout FFT invalido: {d}")
+    if not values:
+        raise ValueError("La lista de layouts FFT no puede estar vacia")
+    return values
+
+
+def parse_fft_shapes(raw, dims):
+    if not raw.strip():
+        return []
+    shapes = []
+    tokens = [x.strip() for x in raw.split(",") if x.strip()]
+    for token in tokens:
+        parts = token.lower().split("x")
+        if len(parts) != dims:
+            raise ValueError(f"Forma FFT invalida: {token}")
+        values = [int(p) for p in parts]
+        if any(v <= 0 for v in values):
+            raise ValueError(f"Forma FFT invalida: {token}")
+        if dims == 1:
+            shapes.append((values[0], 0, 0))
+        elif dims == 2:
+            shapes.append((values[0], values[1], 0))
+        else:
+            shapes.append((values[0], values[1], values[2]))
+    return shapes
+
+
+def fft_dims(nx, ny, nz):
+    if nz > 0:
+        return [nx, ny, nz]
+    if ny > 0:
+        return [nx, ny]
+    return [nx]
+
+
+def fft_total_points(dims):
+    total = 1
+    for d in dims:
+        total *= d
+    return total
+
+
+def fft_complex_elements(dims):
+    last = dims[-1]
+    outer = 1
+    for d in dims[:-1]:
+        outer *= d
+    return outer * (last // 2 + 1)
+
+
+def fft_sum_log2(dims):
+    return sum(math.log2(d) for d in dims)
+
+
+def fft_radix_class(dims):
+    def is_pow2(n):
+        return n > 0 and (n & (n - 1)) == 0
+
+    def is_smooth_235(n):
+        if n <= 0:
+            return False
+        for p in (2, 3, 5):
+            while n % p == 0:
+                n //= p
+        return n == 1
+
+    if all(is_pow2(d) for d in dims):
+        return "pow2"
+    if all(is_smooth_235(d) for d in dims):
+        return "smooth235"
+    return "other"
+
+
+def fft_payload_bytes(dims, batch, precision, domain, layout):
+    real_bytes = 4 if precision == "S" else 8
+    complex_bytes = real_bytes * 2
+    nreal = fft_total_points(dims)
+    ncomplex = fft_complex_elements(dims)
+
+    if domain == "C2C":
+        in_bytes = nreal * complex_bytes * batch
+        out_bytes = nreal * complex_bytes * batch
+    elif domain == "R2C":
+        in_bytes = nreal * real_bytes * batch
+        out_bytes = ncomplex * complex_bytes * batch
+    else:  # C2R
+        in_bytes = ncomplex * complex_bytes * batch
+        out_bytes = nreal * real_bytes * batch
+
+    if layout == "I":
+        return max(in_bytes, out_bytes)
+    return in_bytes + out_bytes
+
+
+def fft_flops(dims, domain):
+    ntotal = fft_total_points(dims)
+    sum_log2 = fft_sum_log2(dims)
+    factor = 5.0 if domain == "C2C" else 2.5
+    return factor * ntotal * sum_log2
 
 
 def monitor_power_gpu(handle, stop_event, power_queue):
@@ -306,82 +467,161 @@ def run_single_case(binary, device, gpu_index, m, n, k, precision, op_a, op_b, t
     }
 
 
-def main():
-    # Configuracion de entrada para barrer tamanos y precisiones.
-    parser = argparse.ArgumentParser(
-        description="Orquestador GEMM cuBLAS con monitoreo de potencia NVML"
-    )
-    parser.add_argument("--binary", default="./GEMMparametros", help="Ruta al binario CUDA")
-    parser.add_argument("--device", choices=["gpu", "cpu"], default="gpu", help="Dispositivo donde ejecutar el benchmark (gpu|cpu)")
-    parser.add_argument(
-        "--sizes",
-        default="128,256,512,1024,2048,4096",
-        help="Lista separada por comas para M,N,K",
-    )
-    parser.add_argument(
-        "--precisions",
-        default="S,D,C,Z",
-        help="Lista separada por comas de precisiones: S,D,C,Z",
-    )
-    parser.add_argument(
-        "--full-dim-sweep",
-        action="store_true",
-        help="Activa el barrido completo de M, N y K; por defecto solo se prueban matrices cuadradas",
-    )
-    parser.add_argument(
-        "--sweep-transpose",
-        action="store_true",
-        help="Activa el barrido de transposicion para opA/opB",
-    )
-    parser.add_argument(
-        "--op-a-list",
-        default="N",
-        help="Lista separada por comas para opA: N,T,C (solo con --sweep-transpose)",
-    )
-    parser.add_argument(
-        "--op-b-list",
-        default="N",
-        help="Lista separada por comas para opB: N,T,C (solo con --sweep-transpose)",
-    )
-    parser.add_argument("--gpu-index", type=int, default=0, help="Indice de GPU para NVML")
-    parser.add_argument(
-        "--output",
-        default="benchmark_results.csv",
-        help="Archivo CSV de salida",
-    )
-    parser.add_argument(
-        "--timeout",
-        type=float,
-        default=300.0,
-        help="Timeout por ejecucion en segundos",
-    )
+def run_single_case_fft(binary, device, gpu_index, nx, ny, nz, batch, precision, domain, direction, layout, timeout):
+    cmd = [
+        binary,
+        str(nx),
+        str(ny),
+        str(nz),
+        str(batch),
+        precision,
+        domain,
+        direction,
+        layout,
+    ]
 
-    args = parser.parse_args()
+    power_queue = queue.Queue(maxsize=1)
+    stop_event = threading.Event()
 
-    # Validacion temprana de parametros antes de iniciar NVML y ejecuciones.
+    monitor_thread = None
+    start_wall = time.perf_counter()
+
+    if device == "gpu":
+        handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
+        monitor_thread = threading.Thread(
+            target=monitor_power_gpu,
+            args=(handle, stop_event, power_queue),
+            daemon=True,
+        )
+    else:
+        rapl = find_rapl_energy_path()
+        if rapl:
+            monitor_thread = threading.Thread(
+                target=monitor_power_cpu,
+                args=(rapl, stop_event, power_queue),
+                daemon=True,
+            )
+        else:
+            print(
+                "Aviso: no se encontro energy_uj RAPL en /sys/class/powercap; "
+                "se registrara Avg_Power_W/Energy_J/EDP como 0.0 para CPU.",
+                file=sys.stderr,
+            )
+
+    if monitor_thread is not None:
+        monitor_thread.start()
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    finally:
+        stop_event.set()
+        if monitor_thread is not None:
+            monitor_thread.join()
+
+    end_wall = time.perf_counter()
+    samples = power_queue.get() if not power_queue.empty() else []
+
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "Fallo en binario FFT para "
+            f"Nx={nx}, Ny={ny}, Nz={nz}, Batch={batch}, P={precision}, D={domain}, Dir={direction}, L={layout}.\n"
+            f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+        )
+
+    match = TIME_PATTERN.search(proc.stdout)
+    if not match:
+        raise RuntimeError(
+            "No se pudo parsear Time_sec de la salida FFT.\n"
+            f"Salida:\n{proc.stdout}"
+        )
+
+    time_sec = float(match.group(1))
+    if time_sec <= 0.0:
+        raise RuntimeError(
+            f"Time_sec invalido ({time_sec}) para Nx={nx},Ny={ny},Nz={nz},Batch={batch}"
+        )
+
+    avg_power_w = 0.0
+    energy_j = 0.0
+
+    if device == "gpu":
+        avg_power_w = sum(p for _, p in samples) / len(samples) if samples else 0.0
+        energy_j = avg_power_w * time_sec
+    else:
+        if len(samples) >= 2:
+            e0 = samples[0][1]
+            e1 = samples[1][1]
+            energy_j = max(0.0, e1 - e0)
+            avg_power_w = energy_j / time_sec if time_sec > 0 else 0.0
+
+    dims = fft_dims(nx, ny, nz)
+    ops = fft_flops(dims, domain)
+    gflops = (ops / time_sec) / 1e9
+    edp = energy_j * time_sec
+    payload_bytes = fft_payload_bytes(dims, batch, precision, domain, layout)
+    radix_class = fft_radix_class(dims)
+
+    return {
+        "Device": device,
+        "Nx": nx,
+        "Ny": ny,
+        "Nz": nz,
+        "Batch": batch,
+        "Precision": precision,
+        "Domain": domain,
+        "Direction": direction,
+        "Layout": layout,
+        "Time_sec": time_sec,
+        "GFLOPS": gflops,
+        "Avg_Power_W": avg_power_w,
+        "Energy_J": energy_j,
+        "EDP": edp,
+        "Payload_Bytes": payload_bytes,
+        "Radix_Class": radix_class,
+        "Samples_Power": len(samples),
+        "Wall_Elapsed_sec": end_wall - start_wall,
+    }
+
+
+def init_nvml_if_needed(device_list, gpu_index):
+    if "gpu" not in device_list:
+        return
+    pynvml.nvmlInit()
+    try:
+        device_count = pynvml.nvmlDeviceGetCount()
+        if gpu_index < 0 or gpu_index >= device_count:
+            raise RuntimeError(
+                f"gpu-index invalido: {gpu_index}. GPUs disponibles: {device_count}"
+            )
+    except Exception:
+        pynvml.nvmlShutdown()
+        raise
+
+
+def run_gemm(args):
+    if args.device not in {"gpu", "cpu"}:
+        raise ValueError("Para GEMM, --device debe ser cpu o gpu")
+
     sizes = parse_sizes(args.sizes)
     precisions = parse_precisions(args.precisions)
     if args.sweep_transpose:
         op_a_list = parse_ops(args.op_a_list)
         op_b_list = parse_ops(args.op_b_list)
     else:
-        # Caso base: GEMM sin transposicion en A y B.
         op_a_list = ["N"]
         op_b_list = ["N"]
 
-    # Inicializaciones por dispositivo
+    output_path = args.output or "benchmark_results.csv"
+    device_list = [args.device]
+
     if args.device == "gpu":
-        pynvml.nvmlInit()
-        try:
-            # Verifica que la GPU solicitada exista en el sistema.
-            device_count = pynvml.nvmlDeviceGetCount()
-            if args.gpu_index < 0 or args.gpu_index >= device_count:
-                raise RuntimeError(
-                    f"gpu-index invalido: {args.gpu_index}. GPUs disponibles: {device_count}"
-                )
-        except Exception:
-            pynvml.nvmlShutdown()
-            raise
+        init_nvml_if_needed(device_list, args.gpu_index)
 
     try:
         fieldnames = [
@@ -406,11 +646,10 @@ def main():
         total = len(dim_cases) * len(precisions) * len(op_a_list) * len(op_b_list)
         done = 0
 
-        with open(args.output, "w", newline="", encoding="utf-8") as f:
+        with open(output_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
 
-            # Recorre los tamanos solicitados; por defecto se fijan como matrices cuadradas.
             for m, n, k in dim_cases:
                 for precision, op_a, op_b in itertools.product(precisions, op_a_list, op_b_list):
                     done += 1
@@ -427,7 +666,6 @@ def main():
                         args.timeout,
                     )
 
-                    # Guarda una fila por experimento en el CSV final.
                     writer.writerow({key: result[key] for key in fieldnames})
                     f.flush()
 
@@ -438,10 +676,239 @@ def main():
                         f"EDP={result['EDP']:.9f}"
                     )
 
-        print(f"\nResultados guardados en: {args.output}")
+        print(f"\nResultados guardados en: {output_path}")
     finally:
         if args.device == "gpu":
             pynvml.nvmlShutdown()
+
+
+def run_fft(args):
+    sizes_1d = parse_fft_shapes(args.fft_sizes_1d, 1)
+    sizes_2d = parse_fft_shapes(args.fft_sizes_2d, 2)
+    sizes_3d = parse_fft_shapes(args.fft_sizes_3d, 3)
+    shapes = sizes_1d + sizes_2d + sizes_3d
+    if not shapes:
+        raise ValueError("No se definieron tamanos FFT (1D/2D/3D)")
+
+    batches = parse_int_list(args.fft_batches, "batches")
+    precisions = parse_fft_precisions(args.fft_precisions)
+    domains = parse_fft_domains(args.fft_domains)
+    directions = parse_fft_directions(args.fft_directions)
+    layouts = parse_fft_layouts(args.fft_layouts)
+
+    if args.device == "both":
+        devices = ["cpu", "gpu"]
+    else:
+        devices = [args.device]
+
+    output_path = args.output or "fft_benchmark_results.csv"
+    init_nvml_if_needed(devices, args.gpu_index)
+
+    try:
+        fieldnames = [
+            "Device",
+            "Nx",
+            "Ny",
+            "Nz",
+            "Batch",
+            "Precision",
+            "Domain",
+            "Direction",
+            "Layout",
+            "Time_sec",
+            "GFLOPS",
+            "Avg_Power_W",
+            "Energy_J",
+            "EDP",
+            "Payload_Bytes",
+            "Radix_Class",
+            "Samples_Power",
+        ]
+
+        cases = []
+        for nx, ny, nz in shapes:
+            for batch in batches:
+                for precision in precisions:
+                    for domain in domains:
+                        if domain == "C2C":
+                            dir_list = directions
+                        elif domain == "R2C":
+                            dir_list = ["F"]
+                        else:
+                            dir_list = ["I"]
+                        for direction in dir_list:
+                            for layout in layouts:
+                                cases.append((nx, ny, nz, batch, precision, domain, direction, layout))
+
+        total = len(cases) * len(devices)
+        done = 0
+
+        with open(output_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+
+            for nx, ny, nz, batch, precision, domain, direction, layout in cases:
+                for device in devices:
+                    done += 1
+                    binary = args.fft_binary_gpu if device == "gpu" else args.fft_binary_cpu
+                    result = run_single_case_fft(
+                        binary,
+                        device,
+                        args.gpu_index,
+                        nx,
+                        ny,
+                        nz,
+                        batch,
+                        precision,
+                        domain,
+                        direction,
+                        layout,
+                        args.timeout,
+                    )
+
+                    writer.writerow({key: result[key] for key in fieldnames})
+                    f.flush()
+
+                    print(
+                        f"[{done}/{total}] {device.upper()} Nx={nx} Ny={ny} Nz={nz} Batch={batch} "
+                        f"P={precision} D={domain} Dir={direction} L={layout} "
+                        f"Time={result['Time_sec']:.6f}s GFLOPS={result['GFLOPS']:.3f} "
+                        f"Pavg={result['Avg_Power_W']:.3f}W Energy={result['Energy_J']:.6f}J "
+                        f"EDP={result['EDP']:.9f}"
+                    )
+
+                    if args.cooldown > 0 and done < total:
+                        time.sleep(args.cooldown)
+
+        print(f"\nResultados guardados en: {output_path}")
+    finally:
+        if "gpu" in devices:
+            pynvml.nvmlShutdown()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Orquestador de benchmarking GEMM/FFT con monitoreo de potencia"
+    )
+    parser.add_argument(
+        "--benchmark",
+        choices=["gemm", "fft"],
+        default="gemm",
+        help="Selecciona el benchmark a ejecutar (gemm|fft)",
+    )
+    parser.add_argument("--binary", default="./GEMMparametros", help="Ruta al binario GEMM CUDA")
+    parser.add_argument(
+        "--device",
+        choices=["gpu", "cpu", "both"],
+        default="gpu",
+        help="Dispositivo donde ejecutar el benchmark (gpu|cpu|both)",
+    )
+    parser.add_argument(
+        "--sizes",
+        default="128,256,512,1024,2048,4096",
+        help="Lista separada por comas para M,N,K (GEMM)",
+    )
+    parser.add_argument(
+        "--precisions",
+        default="S,D,C,Z",
+        help="Lista separada por comas de precisiones (GEMM): S,D,C,Z",
+    )
+    parser.add_argument(
+        "--full-dim-sweep",
+        action="store_true",
+        help="Activa el barrido completo de M, N y K (GEMM)",
+    )
+    parser.add_argument(
+        "--sweep-transpose",
+        action="store_true",
+        help="Activa el barrido de transposicion para opA/opB (GEMM)",
+    )
+    parser.add_argument(
+        "--op-a-list",
+        default="N",
+        help="Lista separada por comas para opA: N,T,C (GEMM)",
+    )
+    parser.add_argument(
+        "--op-b-list",
+        default="N",
+        help="Lista separada por comas para opB: N,T,C (GEMM)",
+    )
+    parser.add_argument("--gpu-index", type=int, default=0, help="Indice de GPU para NVML")
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="Archivo CSV de salida (por defecto: benchmark_results.csv o fft_benchmark_results.csv)",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=300.0,
+        help="Timeout por ejecucion en segundos",
+    )
+
+    parser.add_argument(
+        "--fft-binary-cpu",
+        default="./Asignador/fft_cpu",
+        help="Ruta al binario FFT CPU",
+    )
+    parser.add_argument(
+        "--fft-binary-gpu",
+        default="./Asignador/fft_gpu",
+        help="Ruta al binario FFT GPU",
+    )
+    parser.add_argument(
+        "--fft-sizes-1d",
+        default="512,1024,2048,4096,8192,16384,3072,5120,6144,10240",
+        help="Lista de tamanos 1D FFT (ej: 512,1024)",
+    )
+    parser.add_argument(
+        "--fft-sizes-2d",
+        default="32x32,64x64,128x128,48x48,96x96",
+        help="Lista de tamanos 2D FFT (ej: 64x64,128x128)",
+    )
+    parser.add_argument(
+        "--fft-sizes-3d",
+        default="16x16x16,32x32x32,24x24x24",
+        help="Lista de tamanos 3D FFT (ej: 16x16x16)",
+    )
+    parser.add_argument(
+        "--fft-batches",
+        default="1",
+        help="Lista de batches FFT (ej: 1,2,4)",
+    )
+    parser.add_argument(
+        "--fft-precisions",
+        default="S,D",
+        help="Lista de precisiones FFT: S,D",
+    )
+    parser.add_argument(
+        "--fft-domains",
+        default="C2C,R2C,C2R",
+        help="Lista de dominios FFT: C2C,R2C,C2R",
+    )
+    parser.add_argument(
+        "--fft-directions",
+        default="F,I",
+        help="Lista de direcciones FFT: F,I",
+    )
+    parser.add_argument(
+        "--fft-layouts",
+        default="I,O",
+        help="Lista de layouts FFT: I,O",
+    )
+    parser.add_argument(
+        "--cooldown",
+        type=float,
+        default=1.0,
+        help="Pausa en segundos entre ejecuciones secuenciales (FFT)",
+    )
+
+    args = parser.parse_args()
+
+    if args.benchmark == "gemm":
+        run_gemm(args)
+    else:
+        run_fft(args)
 
 
 if __name__ == "__main__":
