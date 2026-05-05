@@ -77,11 +77,31 @@ import subprocess
 import threading
 import time
 import math
+import statistics
 
 import pynvml
 
 # Expresion regular para extraer el tiempo reportado por el binario CUDA.
 TIME_PATTERN = re.compile(r"Time_sec=([0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)")
+FFT_TIME_PATTERN = re.compile(
+    r"Time_sec=([0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)|tiempo=([0-9]+(?:\.[0-9]+)?)\s*ms",
+    re.IGNORECASE,
+)
+
+_RAPL_WARNING_SHOWN = False
+POWER_SAMPLE_INTERVAL_SEC = 0.02
+
+
+def warn_rapl_missing_once():
+    global _RAPL_WARNING_SHOWN
+    if _RAPL_WARNING_SHOWN:
+        return
+    print(
+        "Aviso: no se encontro energy_uj RAPL en /sys/class/powercap; "
+        "se continuara sin metrica de energia para CPU.",
+        file=sys.stderr,
+    )
+    _RAPL_WARNING_SHOWN = True
 
 
 def parse_sizes(raw):
@@ -273,17 +293,134 @@ def fft_flops(dims, domain):
 
 
 def monitor_power_gpu(handle, stop_event, power_queue):
-    # Hilo de monitoreo NVML: muestrea potencia en mW y la guarda como W.
-    samples = []
-    while not stop_event.is_set():
+    # Hilo de monitoreo NVML: muestrea potencia con un intervalo fijo para evitar picos espurios.
+    # NOTA: NVML documenta nvmlDeviceGetPowerUsage() en mW, pero en algunos entornos se observa
+    # un escalado distinto. Para corregirlo sin "filtrar" datos, inferimos el divisor usando
+    # los límites de potencia del propio dispositivo (constraints/power limit).
+    max_limit_mw = None
+    try:
+        min_mw, max_mw = pynvml.nvmlDeviceGetPowerManagementLimitConstraints(handle)
+        max_limit_mw = int(max_mw)
+    except Exception:
+        max_limit_mw = None
+
+    raw_samples = []
+    while True:
         timestamp = time.perf_counter()
         try:
-            power_mw = pynvml.nvmlDeviceGetPowerUsage(handle)
-            samples.append((timestamp, power_mw / 1000.0))
+            power_raw = pynvml.nvmlDeviceGetPowerUsage(handle)
+            # Guardamos el entero crudo (segun NVML, milivatios) y convertimos después.
+            raw_samples.append((timestamp, int(power_raw)))
         except Exception:
             # En caso de fallo NVML, seguir intentando hasta stop_event
             pass
+        if stop_event.wait(POWER_SAMPLE_INTERVAL_SEC):
+            break
+
+    # Si tenemos menos de 2 muestras, hacemos un muestreo en ráfaga rápido
+    if len(raw_samples) < 2:
+        extra = []
+        burst_reads = 8
+        burst_delay = 0.002  # 2 ms entre lecturas
+        for i in range(burst_reads):
+            try:
+                t = time.perf_counter()
+                p_raw = pynvml.nvmlDeviceGetPowerUsage(handle)
+                extra.append((t, int(p_raw)))
+            except Exception:
+                continue
+            time.sleep(burst_delay)
+
+        if extra:
+            raw_samples.extend(extra)
+
+    if not raw_samples:
+        power_queue.put([])
+        return
+
+    # Inferir la unidad/divisor correcto examinando la mediana de los valores crudos.
+    vals = [v for (_t, v) in raw_samples]
+    median_raw = statistics.median(vals)
+
+    # Candidatos de divisor: 1000 (mW->W) y 1e6 (uW->W)
+    cand_mw = median_raw / 1000.0
+    cand_uw = median_raw / 1e6
+
+    divisor = 1000.0
+    if max_limit_mw is not None and max_limit_mw > 0:
+        max_limit_w = max_limit_mw / 1000.0
+        # Elegimos el candidato que cae dentro de un margen razonable del límite del dispositivo.
+        mw_ok = 0.0 <= cand_mw <= (max_limit_w * 1.20)
+        uw_ok = 0.0 <= cand_uw <= (max_limit_w * 1.20)
+        if uw_ok and not mw_ok:
+            divisor = 1e6
+            print(
+                f"Aviso: NVML power usage parece estar escalado (mediana_raw={median_raw}, "
+                f"limite~{max_limit_w:.1f}W). Usando divisor 1e6 (uW->W).",
+                file=sys.stderr,
+            )
+        elif mw_ok:
+            divisor = 1000.0
+        else:
+            # Ninguno encaja: dejamos mW->W y reportamos para diagnóstico.
+            divisor = 1000.0
+            print(
+                f"Aviso: lectura NVML fuera de rango (mediana_mW={cand_mw:.1f}W, "
+                f"mediana_uW={cand_uw:.3f}W, limite~{max_limit_w:.1f}W).",
+                file=sys.stderr,
+            )
+    else:
+        # Sin límites disponibles, seguimos con el comportamiento estándar de NVML: mW->W.
+        divisor = 1000.0
+
+    # Convertir todas las muestras a Watts
+    samples = [(t, v / divisor) for (t, v) in raw_samples]
+
     power_queue.put(samples)
+
+
+def average_power_from_samples(samples):
+    # Calcula potencia media a partir de muestras temporizadas.
+    if not samples:
+        return 0.0
+    if len(samples) == 1:
+        return samples[0][1]
+
+    samples = sorted(samples, key=lambda item: item[0])
+    area = 0.0
+    for (t0, p0), (t1, p1) in zip(samples, samples[1:]):
+        dt = t1 - t0
+        if dt > 0:
+            area += (p0 + p1) * 0.5 * dt
+
+    duration = samples[-1][0] - samples[0][0]
+    if duration <= 0.0:
+        return samples[-1][1]
+    return area / duration
+
+
+def average_and_energy_from_samples(samples):
+    # Devuelve (avg_power_w, energy_j) integrando las muestras temporizadas.
+    # samples: list of (timestamp, power_w)
+    if not samples:
+        return 0.0, 0.0
+    if len(samples) == 1:
+        # No duration info: treat as instantaneous power, energy undefined (0)
+        return samples[0][1], 0.0
+
+    samples = sorted(samples, key=lambda item: item[0])
+    area = 0.0
+    for (t0, p0), (t1, p1) in zip(samples, samples[1:]):
+        dt = t1 - t0
+        if dt > 0:
+            area += (p0 + p1) * 0.5 * dt
+
+    duration = samples[-1][0] - samples[0][0]
+    if duration <= 0.0:
+        return samples[-1][1], 0.0
+    avg = area / duration
+    energy = area  # area is in W*s = Joules over the sampling window
+    return avg, energy
 
 
 def monitor_power_cpu(energy_path, stop_event, power_queue):
@@ -309,7 +446,8 @@ def monitor_power_cpu(energy_path, stop_event, power_queue):
         power_queue.put([])
         return
 
-    # Guardamos dos muestras (ts, energy_J) en lugar de potencia instantanea.
+    # RAPL energy_uj esta en microjoules, convertimos a joules.
+    # Dividimos entre 1e6 (1 microjoule = 1e-6 joules)
     samples = [(t0, e0 / 1e6), (t1, e1 / 1e6)]
     power_queue.put(samples)
 
@@ -323,6 +461,18 @@ def find_rapl_energy_path():
     def is_readable_energy(path):
         return os.path.isfile(path) and os.access(path, os.R_OK)
 
+    # Rutas comunes conocidas (intel-rapl:0 es el primer socket en la mayoría de sistemas)
+    common_paths = [
+        os.path.join(base_dir, "intel-rapl:0", "energy_uj"),
+        os.path.join(base_dir, "intel-rapl:0:0", "energy_uj"),
+        os.path.join(base_dir, "intel-rapl", "energy_uj"),
+    ]
+    
+    for path in common_paths:
+        if is_readable_energy(path):
+            return path
+
+    # Si no encontró en rutas conocidas, busca recursivamente limitado a nivel 2
     try:
         with os.scandir(base_dir) as entries:
             for entry in entries:
@@ -377,11 +527,7 @@ def run_single_case(binary, device, gpu_index, m, n, k, precision, op_a, op_b, t
                 daemon=True,
             )
         else:
-            print(
-                "Aviso: no se encontro energy_uj RAPL en /sys/class/powercap; "
-                "se registrara Avg_Power_W/Energy_J/EDP como 0.0 para CPU.",
-                file=sys.stderr,
-            )
+            warn_rapl_missing_once()
 
     if monitor_thread is not None:
         monitor_thread.start()
@@ -425,18 +571,22 @@ def run_single_case(binary, device, gpu_index, m, n, k, precision, op_a, op_b, t
     # Calcula potencia y energia dependiendo del dispositivo
     avg_power_w = 0.0
     energy_j = 0.0
+    wall_time = end_wall - start_wall
 
     if device == "gpu":
-        # Promedio de muestras NVML (W)
-        avg_power_w = sum(p for _, p in samples) / len(samples) if samples else 0.0
+        # Promedio temporal de la potencia NVML (W).
+        # Para energía, usamos el tiempo reportado por el binario (kernel) para ser consistente con FFT.
+        avg_power_w = average_power_from_samples(samples)
         energy_j = avg_power_w * time_sec
     else:
         # samples = [(t0, e0_J), (t1, e1_J)]
+        # IMPORTANTE: Para CPU, usamos wall_time (tiempo total) en lugar de time_sec (tiempo del benchmark),
+        # porque RAPL mide energía durante toda la ejecución del proceso, no solo el kernel.
         if len(samples) >= 2:
             e0 = samples[0][1]
             e1 = samples[1][1]
             energy_j = max(0.0, e1 - e0)
-            avg_power_w = energy_j / time_sec if time_sec > 0 else 0.0
+            avg_power_w = energy_j / wall_time if wall_time > 0 else 0.0
         else:
             avg_power_w = 0.0
             energy_j = 0.0
@@ -502,11 +652,7 @@ def run_single_case_fft(binary, device, gpu_index, nx, ny, nz, batch, precision,
                 daemon=True,
             )
         else:
-            print(
-                "Aviso: no se encontro energy_uj RAPL en /sys/class/powercap; "
-                "se registrara Avg_Power_W/Energy_J/EDP como 0.0 para CPU.",
-                file=sys.stderr,
-            )
+            warn_rapl_missing_once()
 
     if monitor_thread is not None:
         monitor_thread.start()
@@ -534,14 +680,17 @@ def run_single_case_fft(binary, device, gpu_index, nx, ny, nz, batch, precision,
             f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
         )
 
-    match = TIME_PATTERN.search(proc.stdout)
+    match = FFT_TIME_PATTERN.search(proc.stdout)
     if not match:
         raise RuntimeError(
-            "No se pudo parsear Time_sec de la salida FFT.\n"
+            "No se pudo parsear tiempo de la salida FFT.\n"
             f"Salida:\n{proc.stdout}"
         )
 
-    time_sec = float(match.group(1))
+    if match.group(1) is not None:
+        time_sec = float(match.group(1))
+    else:
+        time_sec = float(match.group(2)) / 1e3
     if time_sec <= 0.0:
         raise RuntimeError(
             f"Time_sec invalido ({time_sec}) para Nx={nx},Ny={ny},Nz={nz},Batch={batch}"
@@ -549,16 +698,19 @@ def run_single_case_fft(binary, device, gpu_index, nx, ny, nz, batch, precision,
 
     avg_power_w = 0.0
     energy_j = 0.0
+    wall_time = end_wall - start_wall
 
     if device == "gpu":
-        avg_power_w = sum(p for _, p in samples) / len(samples) if samples else 0.0
+        avg_power_w = average_power_from_samples(samples)
         energy_j = avg_power_w * time_sec
     else:
+        # IMPORTANTE: Para CPU, usamos wall_time (tiempo total) en lugar de time_sec (tiempo del FFT),
+        # porque RAPL mide energía durante toda la ejecución del proceso, no solo el kernel.
         if len(samples) >= 2:
             e0 = samples[0][1]
             e1 = samples[1][1]
             energy_j = max(0.0, e1 - e0)
-            avg_power_w = energy_j / time_sec if time_sec > 0 else 0.0
+            avg_power_w = energy_j / wall_time if wall_time > 0 else 0.0
 
     dims = fft_dims(nx, ny, nz)
     ops = fft_flops(dims, domain)
