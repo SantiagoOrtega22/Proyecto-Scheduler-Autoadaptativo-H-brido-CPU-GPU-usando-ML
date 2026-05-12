@@ -1093,8 +1093,8 @@ def init_nvml_if_needed(device_list, gpu_index):
 
 
 def run_gemm(args):
-    if args.device not in {"gpu", "cpu"}:
-        raise ValueError("Para GEMM, --device debe ser cpu o gpu")
+    if args.device not in {"gpu", "cpu", "both"}:
+        raise ValueError("Para GEMM, --device debe ser cpu, gpu o both")
     if args.gemm_warmup < 0:
         raise ValueError("--gemm-warmup no puede ser negativo")
 
@@ -1108,13 +1108,18 @@ def run_gemm(args):
         op_b_list = ["N"]
 
     output_path = args.output or "benchmark_results.csv"
-    device_list = [args.device]
 
-    if args.device == "gpu":
-        init_nvml_if_needed(device_list, args.gpu_index)
+    if args.device == "both":
+        devices = ["cpu", "gpu"]
+    else:
+        devices = [args.device]
+
+    if "gpu" in devices:
+        init_nvml_if_needed(devices, args.gpu_index)
 
     try:
         fieldnames = [
+            "Device",
             "M",
             "N",
             "K",
@@ -1133,7 +1138,7 @@ def run_gemm(args):
         else:
             dim_cases = [(s, s, s) for s in sizes]
 
-        total = len(dim_cases) * len(precisions) * len(op_a_list) * len(op_b_list)
+        total = len(dim_cases) * len(precisions) * len(op_a_list) * len(op_b_list) * len(devices)
         done = 0
 
         with open(output_path, "w", newline="", encoding="utf-8") as f:
@@ -1142,37 +1147,41 @@ def run_gemm(args):
 
             for m, n, k in dim_cases:
                 for precision, op_a, op_b in itertools.product(precisions, op_a_list, op_b_list):
-                    done += 1
-                    result = run_single_case(
-                        args.binary,
-                        args.device,
-                        args.gpu_index,
-                        m,
-                        n,
-                        k,
-                        precision,
-                        op_a,
-                        op_b,
-                        args.timeout,
-                        args.gemm_warmup,
-                        args.seed if args.seed else None,
-                        args.benchmark_bank,
-                        args.gemm_profile,
-                    )
+                    for device in devices:
+                        done += 1
+                        result = run_single_case(
+                            args.binary,
+                            device,
+                            args.gpu_index,
+                            m,
+                            n,
+                            k,
+                            precision,
+                            op_a,
+                            op_b,
+                            args.timeout,
+                            args.gemm_warmup,
+                            args.seed if args.seed else None,
+                            args.benchmark_bank,
+                            args.gemm_profile,
+                        )
 
-                    writer.writerow({key: result[key] for key in fieldnames})
-                    f.flush()
+                        # Include Device in the written row
+                        row = {key: result[key] for key in fieldnames if key != "Device"}
+                        row["Device"] = device
+                        writer.writerow(row)
+                        f.flush()
 
-                    print(
-                        f"[{done}/{total}] M={m} N={n} K={k} P={precision} OpA={op_a} OpB={op_b} "
-                        f"Time={result['Time_sec']:.6f}s GFLOPS={result['GFLOPS']:.3f} "
-                        f"Pavg={result['Avg_Power_W']:.3f}W Energy={result['Energy_J']:.6f}J "
-                        f"EDP={result['EDP']:.9f}"
-                    )
+                        print(
+                            f"[{done}/{total}] {device.upper()} M={m} N={n} K={k} P={precision} OpA={op_a} OpB={op_b} "
+                            f"Time={result['Time_sec']:.6f}s GFLOPS={result['GFLOPS']:.3f} "
+                            f"Pavg={result['Avg_Power_W']:.3f}W Energy={result['Energy_J']:.6f}J "
+                            f"EDP={result['EDP']:.9f}"
+                        )
 
         print(f"\nResultados guardados en: {output_path}")
     finally:
-        if args.device == "gpu":
+        if "gpu" in devices:
             pynvml.nvmlShutdown()
 
 
