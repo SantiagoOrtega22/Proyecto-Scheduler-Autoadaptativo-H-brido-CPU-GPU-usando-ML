@@ -3,7 +3,7 @@
 benchmark_runner.py
 
 Orquestador de benchmarking GEMM/FFT para CPU o GPU.
-
+Instala `h5py` en el mismo entorno donde ejecutas este script: `python3 -m pip install h5py`.
 GUIA DE USO
 -----------
 Modo GPU (usa el binario CUDA `GEMMparametros`):
@@ -64,6 +64,7 @@ NOTAS
     - En CPU, se intenta leer RAPL desde /sys/class/powercap.
     - Si RAPL no esta disponible, el runner sigue y deja potencia/energia en 0.0.
     - La salida del binario debe incluir una linea con `Time_sec=...`.
+      
 """
 
 import argparse
@@ -93,7 +94,10 @@ FFT_TIME_PATTERN = re.compile(
 
 _RAPL_WARNING_SHOWN = False
 POWER_SAMPLE_INTERVAL_SEC = 0.02
+
 DEFAULT_BENCHMARK_BANK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bench files", "benchmark_bank.h5")
+
+
 
 
 def _require_h5py():
