@@ -3,8 +3,10 @@
 #include <cublas_v2.h>
 #include <cuComplex.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <cstdio>
 #include <iomanip>
 #include <iostream>
 #include <string>
@@ -103,6 +105,233 @@
         }                                                                        \
     } while (0)
 
+static bool g_use_random = false;
+static bool g_loaded_from_file = false;
+static std::vector<float> g_file_a_f32;
+static std::vector<float> g_file_b_f32;
+static std::vector<float> g_file_c_f32;
+static std::vector<double> g_file_a_f64;
+static std::vector<double> g_file_b_f64;
+static std::vector<double> g_file_c_f64;
+static std::vector<cuComplex> g_file_a_c32;
+static std::vector<cuComplex> g_file_b_c32;
+static std::vector<cuComplex> g_file_c_c32;
+static std::vector<cuDoubleComplex> g_file_a_c64;
+static std::vector<cuDoubleComplex> g_file_b_c64;
+static std::vector<cuDoubleComplex> g_file_c_c64;
+
+static void init_seed_from_env() {
+    const char *env = std::getenv("BENCH_SEED");
+    if (!env || !*env) {
+        return;
+    }
+    char *end = nullptr;
+    unsigned long val = std::strtoul(env, &end, 10);
+    if (end == env) {
+        return;
+    }
+    std::srand(static_cast<unsigned int>(val));
+    g_use_random = true;
+}
+
+static int load_gemm_matrices_from_file(const char *filename, int *M, int *N, int *K, char *precision) {
+    FILE *f = fopen(filename, "rb");
+    if (!f) {
+        std::perror("fopen");
+        return -1;
+    }
+
+    int m = 0, n = 0, k = 0;
+    char p = '\0';
+    if (fread(&m, sizeof(int), 1, f) != 1 ||
+        fread(&n, sizeof(int), 1, f) != 1 ||
+        fread(&k, sizeof(int), 1, f) != 1 ||
+        fread(&p, sizeof(char), 1, f) != 1) {
+        fclose(f);
+        return -1;
+    }
+
+    g_loaded_from_file = true;
+    g_use_random = false;
+    g_file_a_f32.clear(); g_file_b_f32.clear(); g_file_c_f32.clear();
+    g_file_a_f64.clear(); g_file_b_f64.clear(); g_file_c_f64.clear();
+    g_file_a_c32.clear(); g_file_b_c32.clear(); g_file_c_c32.clear();
+    g_file_a_c64.clear(); g_file_b_c64.clear(); g_file_c_c64.clear();
+
+    size_t size_a = static_cast<size_t>(m) * static_cast<size_t>(k);
+    size_t size_b = static_cast<size_t>(k) * static_cast<size_t>(n);
+    size_t size_c = static_cast<size_t>(m) * static_cast<size_t>(n);
+
+    switch (p) {
+        case 'S': {
+            g_file_a_f32.resize(size_a);
+            g_file_b_f32.resize(size_b);
+            g_file_c_f32.resize(size_c);
+            if (fread(g_file_a_f32.data(), sizeof(float), size_a, f) != size_a ||
+                fread(g_file_b_f32.data(), sizeof(float), size_b, f) != size_b ||
+                fread(g_file_c_f32.data(), sizeof(float), size_c, f) != size_c) {
+                fclose(f);
+                return -1;
+            }
+            break;
+        }
+        case 'D': {
+            g_file_a_f64.resize(size_a);
+            g_file_b_f64.resize(size_b);
+            g_file_c_f64.resize(size_c);
+            if (fread(g_file_a_f64.data(), sizeof(double), size_a, f) != size_a ||
+                fread(g_file_b_f64.data(), sizeof(double), size_b, f) != size_b ||
+                fread(g_file_c_f64.data(), sizeof(double), size_c, f) != size_c) {
+                fclose(f);
+                return -1;
+            }
+            break;
+        }
+        case 'C': {
+            g_file_a_c32.resize(size_a);
+            g_file_b_c32.resize(size_b);
+            g_file_c_c32.resize(size_c);
+            for (size_t i = 0; i < size_a; ++i) {
+                float re = 0.0f, im = 0.0f;
+                if (fread(&re, sizeof(float), 1, f) != 1 || fread(&im, sizeof(float), 1, f) != 1) {
+                    fclose(f);
+                    return -1;
+                }
+                g_file_a_c32[i] = make_cuComplex(re, im);
+            }
+            for (size_t i = 0; i < size_b; ++i) {
+                float re = 0.0f, im = 0.0f;
+                if (fread(&re, sizeof(float), 1, f) != 1 || fread(&im, sizeof(float), 1, f) != 1) {
+                    fclose(f);
+                    return -1;
+                }
+                g_file_b_c32[i] = make_cuComplex(re, im);
+            }
+            for (size_t i = 0; i < size_c; ++i) {
+                float re = 0.0f, im = 0.0f;
+                if (fread(&re, sizeof(float), 1, f) != 1 || fread(&im, sizeof(float), 1, f) != 1) {
+                    fclose(f);
+                    return -1;
+                }
+                g_file_c_c32[i] = make_cuComplex(re, im);
+            }
+            break;
+        }
+        case 'Z': {
+            g_file_a_c64.resize(size_a);
+            g_file_b_c64.resize(size_b);
+            g_file_c_c64.resize(size_c);
+            for (size_t i = 0; i < size_a; ++i) {
+                double re = 0.0, im = 0.0;
+                if (fread(&re, sizeof(double), 1, f) != 1 || fread(&im, sizeof(double), 1, f) != 1) {
+                    fclose(f);
+                    return -1;
+                }
+                g_file_a_c64[i] = make_cuDoubleComplex(re, im);
+            }
+            for (size_t i = 0; i < size_b; ++i) {
+                double re = 0.0, im = 0.0;
+                if (fread(&re, sizeof(double), 1, f) != 1 || fread(&im, sizeof(double), 1, f) != 1) {
+                    fclose(f);
+                    return -1;
+                }
+                g_file_b_c64[i] = make_cuDoubleComplex(re, im);
+            }
+            for (size_t i = 0; i < size_c; ++i) {
+                double re = 0.0, im = 0.0;
+                if (fread(&re, sizeof(double), 1, f) != 1 || fread(&im, sizeof(double), 1, f) != 1) {
+                    fclose(f);
+                    return -1;
+                }
+                g_file_c_c64[i] = make_cuDoubleComplex(re, im);
+            }
+            break;
+        }
+        default:
+            fclose(f);
+            return -1;
+    }
+
+    fclose(f);
+    *M = m;
+    *N = n;
+    *K = k;
+    *precision = p;
+    return 0;
+}
+
+static void fill_real(std::vector<double> &buf) {
+    if (g_loaded_from_file && !g_file_a_f64.empty() && buf.size() == g_file_a_f64.size()) {
+        if (&buf == nullptr) {
+            return;
+        }
+        std::copy(g_file_a_f64.begin(), g_file_a_f64.end(), buf.begin());
+        return;
+    }
+    if (g_use_random) {
+        for (double &v : buf) {
+            v = static_cast<double>(std::rand()) / RAND_MAX;
+        }
+        return;
+    }
+    std::fill(buf.begin(), buf.end(), 1.0);
+}
+
+static void fill_real(std::vector<float> &buf) {
+    if (g_loaded_from_file && !g_file_a_f32.empty() && buf.size() == g_file_a_f32.size()) {
+        if (&buf == nullptr) {
+            return;
+        }
+        std::copy(g_file_a_f32.begin(), g_file_a_f32.end(), buf.begin());
+        return;
+    }
+    if (g_use_random) {
+        for (float &v : buf) {
+            v = static_cast<float>(std::rand()) / RAND_MAX;
+        }
+        return;
+    }
+    std::fill(buf.begin(), buf.end(), 1.0f);
+}
+
+static void fill_complex(std::vector<cuComplex> &buf) {
+    if (g_loaded_from_file && !g_file_a_c32.empty() && buf.size() == g_file_a_c32.size()) {
+        if (&buf == nullptr) {
+            return;
+        }
+        std::copy(g_file_a_c32.begin(), g_file_a_c32.end(), buf.begin());
+        return;
+    }
+    if (g_use_random) {
+        for (cuComplex &v : buf) {
+            float re = static_cast<float>(std::rand()) / RAND_MAX;
+            float im = static_cast<float>(std::rand()) / RAND_MAX;
+            v = make_cuComplex(re, im);
+        }
+        return;
+    }
+    std::fill(buf.begin(), buf.end(), make_cuComplex(1.0f, 0.0f));
+}
+
+static void fill_complex(std::vector<cuDoubleComplex> &buf) {
+    if (g_loaded_from_file && !g_file_a_c64.empty() && buf.size() == g_file_a_c64.size()) {
+        if (&buf == nullptr) {
+            return;
+        }
+        std::copy(g_file_a_c64.begin(), g_file_a_c64.end(), buf.begin());
+        return;
+    }
+    if (g_use_random) {
+        for (cuDoubleComplex &v : buf) {
+            double re = static_cast<double>(std::rand()) / RAND_MAX;
+            double im = static_cast<double>(std::rand()) / RAND_MAX;
+            v = make_cuDoubleComplex(re, im);
+        }
+        return;
+    }
+    std::fill(buf.begin(), buf.end(), make_cuDoubleComplex(1.0, 0.0));
+}
+
 double benchmark_dgemm(cublasHandle_t handle, int M, int N, int K,
                        cublasOperation_t opA, cublasOperation_t opB) {
     size_t size_a = static_cast<size_t>(M) * K;
@@ -112,9 +341,17 @@ double benchmark_dgemm(cublasHandle_t handle, int M, int N, int K,
     int ldb = (opB == CUBLAS_OP_N) ? K : N;
     int ldc = M;
 
-    std::vector<double> h_a(size_a, 1.0);
-    std::vector<double> h_b(size_b, 1.0);
+    std::vector<double> h_a(size_a);
+    std::vector<double> h_b(size_b);
     std::vector<double> h_c(size_c, 0.0);
+
+    if (g_loaded_from_file && !g_file_a_f64.empty()) {
+        std::copy(g_file_a_f64.begin(), g_file_a_f64.end(), h_a.begin());
+        std::copy(g_file_b_f64.begin(), g_file_b_f64.end(), h_b.begin());
+    } else {
+        fill_real(h_a);
+        fill_real(h_b);
+    }
 
     double* d_a = nullptr;
     double* d_b = nullptr;
@@ -167,9 +404,17 @@ double benchmark_sgemm(cublasHandle_t handle, int M, int N, int K,
     int ldb = (opB == CUBLAS_OP_N) ? K : N;
     int ldc = M;
 
-    std::vector<float> h_a(size_a, 1.0f);
-    std::vector<float> h_b(size_b, 1.0f);
+    std::vector<float> h_a(size_a);
+    std::vector<float> h_b(size_b);
     std::vector<float> h_c(size_c, 0.0f);
+
+    if (g_loaded_from_file && !g_file_a_f32.empty()) {
+        std::copy(g_file_a_f32.begin(), g_file_a_f32.end(), h_a.begin());
+        std::copy(g_file_b_f32.begin(), g_file_b_f32.end(), h_b.begin());
+    } else {
+        fill_real(h_a);
+        fill_real(h_b);
+    }
 
     float* d_a = nullptr;
     float* d_b = nullptr;
@@ -222,9 +467,17 @@ double benchmark_cgemm(cublasHandle_t handle, int M, int N, int K,
     int ldb = (opB == CUBLAS_OP_N) ? K : N;
     int ldc = M;
 
-    std::vector<cuComplex> h_a(size_a, make_cuComplex(1.0f, 0.0f));
-    std::vector<cuComplex> h_b(size_b, make_cuComplex(1.0f, 0.0f));
+    std::vector<cuComplex> h_a(size_a);
+    std::vector<cuComplex> h_b(size_b);
     std::vector<cuComplex> h_c(size_c, make_cuComplex(0.0f, 0.0f));
+
+    if (g_loaded_from_file && !g_file_a_c32.empty()) {
+        std::copy(g_file_a_c32.begin(), g_file_a_c32.end(), h_a.begin());
+        std::copy(g_file_b_c32.begin(), g_file_b_c32.end(), h_b.begin());
+    } else {
+        fill_complex(h_a);
+        fill_complex(h_b);
+    }
 
     cuComplex* d_a = nullptr;
     cuComplex* d_b = nullptr;
@@ -277,9 +530,17 @@ double benchmark_zgemm(cublasHandle_t handle, int M, int N, int K,
     int ldb = (opB == CUBLAS_OP_N) ? K : N;
     int ldc = M;
 
-    std::vector<cuDoubleComplex> h_a(size_a, make_cuDoubleComplex(1.0, 0.0));
-    std::vector<cuDoubleComplex> h_b(size_b, make_cuDoubleComplex(1.0, 0.0));
+    std::vector<cuDoubleComplex> h_a(size_a);
+    std::vector<cuDoubleComplex> h_b(size_b);
     std::vector<cuDoubleComplex> h_c(size_c, make_cuDoubleComplex(0.0, 0.0));
+
+    if (g_loaded_from_file && !g_file_a_c64.empty()) {
+        std::copy(g_file_a_c64.begin(), g_file_a_c64.end(), h_a.begin());
+        std::copy(g_file_b_c64.begin(), g_file_b_c64.end(), h_b.begin());
+    } else {
+        fill_complex(h_a);
+        fill_complex(h_b);
+    }
 
     cuDoubleComplex* d_a = nullptr;
     cuDoubleComplex* d_b = nullptr;
@@ -325,7 +586,7 @@ double benchmark_zgemm(cublasHandle_t handle, int M, int N, int K,
 
 // Muestra la ayuda cuando faltan argumentos o el formato de entrada es incorrecto.
 void print_usage(const char* program) {
-    std::cerr << "Uso: " << program << " <M> <N> <K> <precision> [opA opB]" << std::endl;
+    std::cerr << "Uso: " << program << " <M> <N> <K> <precision> [opA opB] [matrix_file]" << std::endl;
     std::cerr << "precision: S (float), D (double), C (complex float), Z (complex double)" << std::endl;
     std::cerr << "opA/opB: N (no transpuesta), T (transpuesta), C (conjugada)" << std::endl;
 }
@@ -349,10 +610,12 @@ cublasOperation_t parse_op(char op) {
 // El caso base usa NxN sin transposicion; opA/opB solo se leen si se pasan.
 
 int main(int argc, char** argv) {
-    if (argc != 5 && argc != 7) {
+    if (argc != 5 && argc != 7 && argc != 8) {
         print_usage(argv[0]);
         return EXIT_FAILURE;
     }
+
+    init_seed_from_env();
 
     int M = std::atoi(argv[1]);
     int N = std::atoi(argv[2]);
@@ -360,10 +623,15 @@ int main(int argc, char** argv) {
     std::string precision = argv[4];
     std::string op_a_str = "N";
     std::string op_b_str = "N";
+    const char *matrix_file = nullptr;
 
     if (argc == 7) {
         op_a_str = argv[5];
         op_b_str = argv[6];
+    } else if (argc == 8) {
+        op_a_str = argv[5];
+        op_b_str = argv[6];
+        matrix_file = argv[7];
     }
 
     if (M <= 0 || N <= 0 || K <= 0) {
@@ -378,6 +646,15 @@ int main(int argc, char** argv) {
     if (op_a_str.size() != 1 || op_b_str.size() != 1) {
         std::cerr << "Error: opA y opB deben ser un caracter (N/T/C)." << std::endl;
         return EXIT_FAILURE;
+    }
+
+    if (matrix_file) {
+        char file_prec = '\0';
+        if (load_gemm_matrices_from_file(matrix_file, &M, &N, &K, &file_prec) != 0) {
+            std::cerr << "Error: no se pudo cargar el archivo de matrices." << std::endl;
+            return EXIT_FAILURE;
+        }
+        precision[0] = static_cast<char>(std::toupper(file_prec));
     }
 // Normaliza las operaciones y las convierte al formato de cuBLAS.
     

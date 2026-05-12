@@ -78,6 +78,9 @@ import threading
 import time
 import math
 import statistics
+import struct
+import random
+import tempfile
 
 import pynvml
 
@@ -90,6 +93,18 @@ FFT_TIME_PATTERN = re.compile(
 
 _RAPL_WARNING_SHOWN = False
 POWER_SAMPLE_INTERVAL_SEC = 0.02
+DEFAULT_BENCHMARK_BANK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bench files", "benchmark_bank.h5")
+
+
+def _require_h5py():
+    try:
+        import h5py
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "h5py es necesario para usar el banco HDF5 de benchmarks. "
+            "Instala la dependencia con: python3 -m pip install h5py"
+        ) from exc
+    return h5py
 
 
 def warn_rapl_missing_once():
@@ -216,6 +231,80 @@ def parse_fft_shapes(raw, dims):
         else:
             shapes.append((values[0], values[1], values[2]))
     return shapes
+
+
+def bank_dataset_exists(bank_path, dataset_path):
+    h5py = _require_h5py()
+    if not bank_path or not os.path.isfile(bank_path):
+        return False
+    try:
+        with h5py.File(bank_path, "r") as hf:
+            return dataset_path in hf
+    except OSError:
+        return False
+
+
+def write_gemm_matrix_file_from_arrays(m, n, k, precision, a_values, b_values, c_values):
+    fd, matrix_file = tempfile.mkstemp(prefix="gemm_", suffix=".bin")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(struct.pack("i", m))
+            f.write(struct.pack("i", n))
+            f.write(struct.pack("i", k))
+            f.write(precision.encode("ascii"))
+
+            if precision in ("S", "D"):
+                fmt = "d" if precision == "D" else "f"
+                for val in a_values:
+                    f.write(struct.pack(fmt, float(val)))
+                for val in b_values:
+                    f.write(struct.pack(fmt, float(val)))
+                for val in c_values:
+                    f.write(struct.pack(fmt, float(val)))
+            else:
+                fmt = "d" if precision == "Z" else "f"
+                for re, im in a_values:
+                    f.write(struct.pack(fmt, float(re)))
+                    f.write(struct.pack(fmt, float(im)))
+                for re, im in b_values:
+                    f.write(struct.pack(fmt, float(re)))
+                    f.write(struct.pack(fmt, float(im)))
+                for re, im in c_values:
+                    f.write(struct.pack(fmt, float(re)))
+                    f.write(struct.pack(fmt, float(im)))
+    except Exception:
+        os.unlink(matrix_file)
+        raise
+    return matrix_file
+
+
+def write_fft_matrix_file_from_arrays(nx, ny, nz, batch, precision, domain, input_values, output_values):
+    fd, matrix_file = tempfile.mkstemp(prefix="fft_", suffix=".bin")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(struct.pack("i", nx))
+            f.write(struct.pack("i", ny))
+            f.write(struct.pack("i", nz))
+            f.write(struct.pack("i", batch))
+            f.write(precision.encode("ascii"))
+            f.write(domain.encode("ascii"))
+            fmt = "d" if precision == "D" else "f"
+            for value in input_values:
+                if isinstance(value, complex):
+                    f.write(struct.pack(fmt, float(value.real)))
+                    f.write(struct.pack(fmt, float(value.imag)))
+                else:
+                    f.write(struct.pack(fmt, float(value)))
+            for value in output_values:
+                if isinstance(value, complex):
+                    f.write(struct.pack(fmt, float(value.real)))
+                    f.write(struct.pack(fmt, float(value.imag)))
+                else:
+                    f.write(struct.pack(fmt, float(value)))
+    except Exception:
+        os.unlink(matrix_file)
+        raise
+    return matrix_file
 
 
 def fft_dims(nx, ny, nz):
@@ -521,38 +610,116 @@ def find_rapl_energy_path():
     return None
 
 
-def run_single_case(binary, device, gpu_index, m, n, k, precision, op_a, op_b, timeout):
-    # Ejecuta un unico experimento (M,N,K,precision) y toma potencia en paralelo.
-    cmd = [binary, str(m), str(n), str(k), precision, op_a, op_b]
-
-    power_queue = queue.Queue(maxsize=1)
-    stop_event = threading.Event()
-
-    monitor_thread = None
-    start_wall = time.perf_counter()
-
-    if device == "gpu":
-        handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
-        monitor_thread = threading.Thread(
-            target=monitor_power_gpu,
-            args=(handle, stop_event, power_queue),
-            daemon=True,
-        )
-    else:
-        rapl = find_rapl_energy_path()
-        if rapl:
-            monitor_thread = threading.Thread(
-                target=monitor_power_cpu,
-                args=(rapl, stop_event, power_queue),
-                daemon=True,
+def generate_gemm_matrix_file(m, n, k, precision, seed=None, bank_path=None, bank_profile="dense_normal"):
+    """Genera archivo binario con matrices GEMM determinísticas."""
+    h5py = _require_h5py()
+    if bank_path and precision in {"S", "D"} and m == n == k:
+        dataset_root = f"/gemm/N{m}/{bank_profile}"
+        a_key = f"{dataset_root}/A_{'f64' if precision == 'D' else 'f32'}"
+        b_key = f"{dataset_root}/B_{'f64' if precision == 'D' else 'f32'}"
+        if bank_dataset_exists(bank_path, a_key) and bank_dataset_exists(bank_path, b_key):
+            with h5py.File(bank_path, "r") as hf:
+                a_values = hf[a_key][()]
+                b_values = hf[b_key][()]
+            c_values = [0.0] * (m * n)
+            return write_gemm_matrix_file_from_arrays(
+                m,
+                n,
+                k,
+                precision,
+                a_values.ravel(),
+                b_values.ravel(),
+                c_values,
             )
+
+    if seed is not None:
+        random.seed(seed)
+    else:
+        seed = random.randint(0, 2**31 - 1)
+        random.seed(seed)
+    
+    # Generar datos
+    if precision == 'S':
+        A = [random.random() for _ in range(m * k)]
+        B = [random.random() for _ in range(k * n)]
+        C = [0.0] * (m * n)
+    elif precision == 'D':
+        A = [random.random() for _ in range(m * k)]
+        B = [random.random() for _ in range(k * n)]
+        C = [0.0] * (m * n)
+    elif precision == 'C':
+        A = [(random.random(), random.random()) for _ in range(m * k)]
+        B = [(random.random(), random.random()) for _ in range(k * n)]
+        C = [(0.0, 0.0)] * (m * n)
+    elif precision == 'Z':
+        A = [(random.random(), random.random()) for _ in range(m * k)]
+        B = [(random.random(), random.random()) for _ in range(k * n)]
+        C = [(0.0, 0.0)] * (m * n)
+    else:
+        raise ValueError(f"Precision invalida: {precision}")
+    
+    return write_gemm_matrix_file_from_arrays(m, n, k, precision, A, B, C)
+
+
+def generate_fft_matrix_file(nx, ny, nz, batch, precision, domain, layout, seed=None, bank_path=None, bank_profile="broadband"):
+    h5py = _require_h5py()
+    if bank_path and ny == 0 and nz == 0:
+        dataset_root = f"/fft/N{nx}/{bank_profile}"
+        if domain == "C2C":
+            label = "c128" if precision == "D" else "c64"
+        elif domain == "R2C":
+            label = "f64" if precision == "D" else "f32"
         else:
-            warn_rapl_missing_once()
+            label = "c128" if precision == "D" else "c64"
 
-    if monitor_thread is not None:
-        monitor_thread.start()
+        dataset_key = f"{dataset_root}/{label}"
+        if bank_dataset_exists(bank_path, dataset_key):
+            with h5py.File(bank_path, "r") as hf:
+                payload = list(hf[dataset_key][()])
 
-    try:
+            if batch > 1:
+                payload = payload * batch
+
+            if domain == "C2C":
+                input_values = payload
+                output_values = [0j] * len(payload)
+            elif domain == "R2C":
+                input_values = payload
+                output_values = [0j] * (nx * batch)
+            else:
+                input_values = payload
+                output_values = [0.0] * (nx * batch)
+
+            return write_fft_matrix_file_from_arrays(
+                nx,
+                ny,
+                nz,
+                batch,
+                precision,
+                domain,
+                input_values,
+                output_values,
+            )
+
+    if seed is not None:
+        random.seed(seed)
+
+    if domain == "C2C":
+        nreal = 1
+        for d in [nx, ny, nz]:
+            if d > 0:
+                nreal *= d
+        nreal *= batch
+        input_values = [complex(random.random(), random.random()) for _ in range(nreal)]
+        output_values = [0j] * nreal
+        return write_fft_matrix_file_from_arrays(nx, ny, nz, batch, precision, domain, input_values, output_values)
+
+    return None
+
+
+def run_gemm_warmup(cmd, timeout, warmup_runs, matrix_file=None):
+    # Ejecuta warmup(s) sin recolectar potencia ni parsear tiempos.
+    for _ in range(warmup_runs):
         proc = subprocess.run(
             cmd,
             capture_output=True,
@@ -560,81 +727,153 @@ def run_single_case(binary, device, gpu_index, m, n, k, precision, op_a, op_b, t
             timeout=timeout,
             check=False,
         )
-    finally:
-        stop_event.set()
-        if monitor_thread is not None:
-            monitor_thread.join()
+        if proc.returncode != 0:
+            raise RuntimeError(
+                "Fallo en warmup GEMM.\n"
+                f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+            )
 
-    end_wall = time.perf_counter()
-    samples = power_queue.get() if not power_queue.empty() else []
 
-    if proc.returncode != 0:
-        raise RuntimeError(
-            "Fallo en binario para "
-            f"M={m}, N={n}, K={k}, P={precision}, OpA={op_a}, OpB={op_b}.\n"
-            f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
-        )
+def run_single_case(
+    binary,
+    device,
+    gpu_index,
+    m,
+    n,
+    k,
+    precision,
+    op_a,
+    op_b,
+    timeout,
+    warmup_runs,
+    seed,
+    bank_path,
+    bank_profile,
+):
+    matrix_file = generate_gemm_matrix_file(
+        m,
+        n,
+        k,
+        precision,
+        seed=seed,
+        bank_path=bank_path,
+        bank_profile=bank_profile,
+    )
 
-    match = TIME_PATTERN.search(proc.stdout)
-    if not match:
-        raise RuntimeError(
-            "No se pudo parsear Time_sec de la salida del binario.\n"
-            f"Salida:\n{proc.stdout}"
-        )
+    try:
+        cmd = [binary, str(m), str(n), str(k), precision, op_a, op_b, matrix_file]
 
-    time_sec = float(match.group(1))
-    if time_sec <= 0.0:
-        raise RuntimeError(
-            f"Time_sec invalido ({time_sec}) para M={m},N={n},K={k},P={precision},OpA={op_a},OpB={op_b}"
-        )
+        if warmup_runs > 0:
+            run_gemm_warmup(cmd, timeout, warmup_runs, matrix_file)
 
-    # Calcula potencia y energia dependiendo del dispositivo
-    avg_power_w = 0.0
-    energy_j = 0.0
-    wall_time = end_wall - start_wall
+        power_queue = queue.Queue(maxsize=1)
+        stop_event = threading.Event()
 
-    if device == "gpu":
-        # Promedio temporal de la potencia NVML (W).
-        # Para energía, usamos el tiempo reportado por el binario (kernel) para ser consistente con FFT.
-        avg_power_w = average_power_from_samples(samples)
-        energy_j = avg_power_w * time_sec
-    else:
-        # samples = [(t0, e0_J), (t1, e1_J)]
-        # IMPORTANTE: Para CPU, usamos wall_time (tiempo total) en lugar de time_sec (tiempo del benchmark),
-        # porque RAPL mide energía durante toda la ejecución del proceso, no solo el kernel.
-        if len(samples) >= 2:
-            e0 = samples[0][1]
-            e1 = samples[1][1]
-            energy_j = max(0.0, e1 - e0)
-            avg_power_w = energy_j / wall_time if wall_time > 0 else 0.0
+        monitor_thread = None
+        start_wall = time.perf_counter()
+
+        if device == "gpu":
+            handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
+            monitor_thread = threading.Thread(
+                target=monitor_power_gpu,
+                args=(handle, stop_event, power_queue),
+                daemon=True,
+            )
         else:
-            avg_power_w = 0.0
-            energy_j = 0.0
+            rapl = find_rapl_energy_path()
+            if rapl:
+                monitor_thread = threading.Thread(
+                    target=monitor_power_cpu,
+                    args=(rapl, stop_event, power_queue),
+                    daemon=True,
+                )
+            else:
+                warn_rapl_missing_once()
 
-    # FLOPs teoricos por tipo: complejos ~8MNK, reales ~2MNK.
-    if precision in {"C", "Z"}:
-        ops = 8.0 * m * n * k
-    else:
-        ops = 2.0 * m * n * k
+        if monitor_thread is not None:
+            monitor_thread.start()
 
-    gflops = (ops / time_sec) / 1e9
-    edp = energy_j * time_sec
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        finally:
+            stop_event.set()
+            if monitor_thread is not None:
+                monitor_thread.join()
 
-    return {
-        "M": m,
-        "N": n,
-        "K": k,
-        "Precision": precision,
-        "OpA": op_a,
-        "OpB": op_b,
-        "Time_sec": time_sec,
-        "GFLOPS": gflops,
-        "Avg_Power_W": avg_power_w,
-        "Energy_J": energy_j,
-        "EDP": edp,
-        "Power_Samples": len(samples),
-        "Wall_Elapsed_sec": end_wall - start_wall,
-    }
+        end_wall = time.perf_counter()
+        samples = power_queue.get() if not power_queue.empty() else []
+
+        if proc.returncode != 0:
+            raise RuntimeError(
+                "Fallo en binario para "
+                f"M={m}, N={n}, K={k}, P={precision}, OpA={op_a}, OpB={op_b}.\n"
+                f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+            )
+
+        match = TIME_PATTERN.search(proc.stdout)
+        if not match:
+            raise RuntimeError(
+                "No se pudo parsear Time_sec de la salida del binario.\n"
+                f"Salida:\n{proc.stdout}"
+            )
+
+        time_sec = float(match.group(1))
+        if time_sec <= 0.0:
+            raise RuntimeError(
+                f"Time_sec invalido ({time_sec}) para M={m},N={n},K={k},P={precision},OpA={op_a},OpB={op_b}"
+            )
+
+        avg_power_w = 0.0
+        energy_j = 0.0
+        wall_time = end_wall - start_wall
+        power_window_sec = wall_time
+
+        if device == "gpu":
+            avg_power_w, energy_j = average_and_energy_from_samples(samples)
+            if samples:
+                power_window_sec = samples[-1][0] - samples[0][0]
+        else:
+            if len(samples) >= 2:
+                e0 = samples[0][1]
+                e1 = samples[1][1]
+                energy_j = max(0.0, e1 - e0)
+                avg_power_w = energy_j / wall_time if wall_time > 0 else 0.0
+            else:
+                avg_power_w = 0.0
+                energy_j = 0.0
+
+        if precision in {"C", "Z"}:
+            ops = 8.0 * m * n * k
+        else:
+            ops = 2.0 * m * n * k
+
+        gflops = (ops / time_sec) / 1e9
+        edp = energy_j * power_window_sec
+
+        return {
+            "M": m,
+            "N": n,
+            "K": k,
+            "Precision": precision,
+            "OpA": op_a,
+            "OpB": op_b,
+            "Time_sec": time_sec,
+            "GFLOPS": gflops,
+            "Avg_Power_W": avg_power_w,
+            "Energy_J": energy_j,
+            "EDP": edp,
+            "Power_Samples": len(samples),
+            "Wall_Elapsed_sec": end_wall - start_wall,
+        }
+    finally:
+        if os.path.exists(matrix_file):
+            os.unlink(matrix_file)
 
 
 def run_single_case_fft(
@@ -653,6 +892,7 @@ def run_single_case_fft(
     warmup,
     iters,
     timeout,
+    matrix_file,
 ):
     cmd = [
         binary,
@@ -671,6 +911,8 @@ def run_single_case_fft(
         cmd.append(str(iters))
     if plan is not None:
         cmd.append(plan)
+    if matrix_file:
+        cmd.append(matrix_file)
 
     power_queue = queue.Queue(maxsize=1)
     stop_event = threading.Event()
@@ -762,7 +1004,7 @@ def run_single_case_fft(
     dims = fft_dims(nx, ny, nz)
     ops = fft_flops(dims, domain)
     gflops = (ops / time_sec) / 1e9
-    edp = energy_j * power_window_sec
+    edp = energy_j * time_sec
     payload_bytes = fft_payload_bytes(dims, batch, precision, domain, layout)
     radix_class = fft_radix_class(dims)
 
@@ -788,6 +1030,53 @@ def run_single_case_fft(
     }
 
 
+def run_fft_warmup(
+    binary,
+    nx,
+    ny,
+    nz,
+    batch,
+    precision,
+    domain,
+    direction,
+    layout,
+    plan,
+    warmup,
+    timeout,
+    matrix_file,
+):
+    cmd = [
+        binary,
+        str(nx),
+        str(ny),
+        str(nz),
+        str(batch),
+        precision,
+        domain,
+        direction,
+        layout,
+        str(warmup),
+        "0",
+    ]
+    if plan is not None:
+        cmd.append(plan)
+    if matrix_file:
+        cmd.append(matrix_file)
+
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "Fallo en warmup FFT.\n"
+            f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+        )
+
+
 def init_nvml_if_needed(device_list, gpu_index):
     if "gpu" not in device_list:
         return
@@ -806,6 +1095,8 @@ def init_nvml_if_needed(device_list, gpu_index):
 def run_gemm(args):
     if args.device not in {"gpu", "cpu"}:
         raise ValueError("Para GEMM, --device debe ser cpu o gpu")
+    if args.gemm_warmup < 0:
+        raise ValueError("--gemm-warmup no puede ser negativo")
 
     sizes = parse_sizes(args.sizes)
     precisions = parse_precisions(args.precisions)
@@ -863,6 +1154,10 @@ def run_gemm(args):
                         op_a,
                         op_b,
                         args.timeout,
+                        args.gemm_warmup,
+                        args.seed if args.seed else None,
+                        args.benchmark_bank,
+                        args.gemm_profile,
                     )
 
                     writer.writerow({key: result[key] for key in fieldnames})
@@ -950,22 +1245,57 @@ def run_fft(args):
                 for device in devices:
                     done += 1
                     binary = args.fft_binary_gpu if device == "gpu" else args.fft_binary_cpu
-                    result = run_single_case_fft(
-                        binary,
-                        device,
-                        args.gpu_index,
+                    matrix_file = generate_fft_matrix_file(
                         nx,
                         ny,
                         nz,
                         batch,
                         precision,
                         domain,
-                        direction,
                         layout,
-                        args.fft_warmup,
-                        args.fft_iters,
-                        args.timeout,
+                        seed=args.seed,
+                        bank_path=args.benchmark_bank,
+                        bank_profile=args.fft_profile,
                     )
+                    
+                    try:
+                        if args.fft_warmup > 0:
+                            run_fft_warmup(
+                                binary,
+                                nx,
+                                ny,
+                                nz,
+                                batch,
+                                precision,
+                                domain,
+                                direction,
+                                layout,
+                                args.fft_plan,
+                                args.fft_warmup,
+                                args.timeout,
+                                matrix_file,
+                            )
+                        result = run_single_case_fft(
+                            binary,
+                            device,
+                            args.gpu_index,
+                            nx,
+                            ny,
+                            nz,
+                            batch,
+                            precision,
+                            domain,
+                            direction,
+                            layout,
+                            args.fft_plan,
+                            args.fft_warmup,
+                            args.fft_iters,
+                            args.timeout,
+                            matrix_file,
+                        )
+                    finally:
+                        if matrix_file and os.path.exists(matrix_file):
+                            os.unlink(matrix_file)
 
                     writer.writerow({key: result[key] for key in fieldnames})
                     f.flush()
@@ -1045,6 +1375,33 @@ def main():
         type=float,
         default=300.0,
         help="Timeout por ejecucion en segundos",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Semilla fija para matrices (se exporta como BENCH_SEED)",
+    )
+    parser.add_argument(
+        "--benchmark-bank",
+        default=DEFAULT_BENCHMARK_BANK,
+        help="Ruta al banco HDF5 de entradas benchmark",
+    )
+    parser.add_argument(
+        "--gemm-profile",
+        default="dense_normal",
+        help="Perfil GEMM dentro del banco HDF5",
+    )
+    parser.add_argument(
+        "--fft-profile",
+        default="broadband",
+        help="Perfil FFT dentro del banco HDF5",
+    )
+    parser.add_argument(
+        "--gemm-warmup",
+        type=int,
+        default=1,
+        help="Ejecuciones de warmup previas a GEMM",
     )
 
     parser.add_argument(

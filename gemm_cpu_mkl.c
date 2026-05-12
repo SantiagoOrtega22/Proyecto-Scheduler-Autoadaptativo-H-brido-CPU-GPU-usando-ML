@@ -69,6 +69,111 @@
 #include <cblas.h>
 #include <complex.h>
 
+static int seed_from_env(unsigned int *out_seed) {
+    const char *env = getenv("BENCH_SEED");
+    if (!env || !*env) {
+        return 0;
+    }
+    char *end = NULL;
+    unsigned long val = strtoul(env, &end, 10);
+    if (end == env) {
+        return 0;
+    }
+    *out_seed = (unsigned int)val;
+    return 1;
+}
+
+static int load_gemm_matrices_from_file(const char *filename, int *M, int *N, int *K, char *prec, 
+                                         void **A, void **B, void **C) {
+    FILE *f = fopen(filename, "rb");
+    if (!f) {
+        perror("No se pudo abrir archivo de matrices");
+        return -1;
+    }
+    
+    if (fread(M, sizeof(int), 1, f) != 1 || 
+        fread(N, sizeof(int), 1, f) != 1 ||
+        fread(K, sizeof(int), 1, f) != 1 ||
+        fread(prec, 1, 1, f) != 1) {
+        perror("Error al leer encabezado del archivo");
+        fclose(f);
+        return -1;
+    }
+    
+    size_t size_a = (size_t)(*M) * (*K);
+    size_t size_b = (size_t)(*K) * (*N);
+    size_t size_c = (size_t)(*M) * (*N);
+    
+    if (*prec == 'S') {
+        *A = malloc(size_a * sizeof(float));
+        *B = malloc(size_b * sizeof(float));
+        *C = malloc(size_c * sizeof(float));
+        if (!*A || !*B || !*C) {
+            free(*A); free(*B); free(*C);
+            fclose(f);
+            return -1;
+        }
+        if (fread(*A, sizeof(float), size_a, f) != size_a ||
+            fread(*B, sizeof(float), size_b, f) != size_b ||
+            fread(*C, sizeof(float), size_c, f) != size_c) {
+            free(*A); free(*B); free(*C);
+            fclose(f);
+            return -1;
+        }
+    } else if (*prec == 'D') {
+        *A = malloc(size_a * sizeof(double));
+        *B = malloc(size_b * sizeof(double));
+        *C = malloc(size_c * sizeof(double));
+        if (!*A || !*B || !*C) {
+            free(*A); free(*B); free(*C);
+            fclose(f);
+            return -1;
+        }
+        if (fread(*A, sizeof(double), size_a, f) != size_a ||
+            fread(*B, sizeof(double), size_b, f) != size_b ||
+            fread(*C, sizeof(double), size_c, f) != size_c) {
+            free(*A); free(*B); free(*C);
+            fclose(f);
+            return -1;
+        }
+    } else if (*prec == 'C') {
+        *A = malloc(size_a * 2 * sizeof(float));
+        *B = malloc(size_b * 2 * sizeof(float));
+        *C = malloc(size_c * 2 * sizeof(float));
+        if (!*A || !*B || !*C) {
+            free(*A); free(*B); free(*C);
+            fclose(f);
+            return -1;
+        }
+        if (fread(*A, sizeof(float), size_a * 2, f) != size_a * 2 ||
+            fread(*B, sizeof(float), size_b * 2, f) != size_b * 2 ||
+            fread(*C, sizeof(float), size_c * 2, f) != size_c * 2) {
+            free(*A); free(*B); free(*C);
+            fclose(f);
+            return -1;
+        }
+    } else if (*prec == 'Z') {
+        *A = malloc(size_a * 2 * sizeof(double));
+        *B = malloc(size_b * 2 * sizeof(double));
+        *C = malloc(size_c * 2 * sizeof(double));
+        if (!*A || !*B || !*C) {
+            free(*A); free(*B); free(*C);
+            fclose(f);
+            return -1;
+        }
+        if (fread(*A, sizeof(double), size_a * 2, f) != size_a * 2 ||
+            fread(*B, sizeof(double), size_b * 2, f) != size_b * 2 ||
+            fread(*C, sizeof(double), size_c * 2, f) != size_c * 2) {
+            free(*A); free(*B); free(*C);
+            fclose(f);
+            return -1;
+        }
+    }
+    
+    fclose(f);
+    return 0;
+}
+
 static double get_time_sec(void) {
     // Temporizador monotónico para medir la duracion del benchmark sin saltos.
     struct timespec ts;
@@ -221,8 +326,8 @@ int main(int argc, char **argv) {
 
     // Valida que la linea de comandos tenga los parametros minimos.
     if (argc < 5) {
-        fprintf(stderr, "Usage: %s M N K <S|D|C|Z> [OpA] [OpB]\n", argv[0]);
-        fprintf(stderr, "Example: %s 512 512 512 S N N\n", argv[0]);
+        fprintf(stderr, "Usage: %s M N K <S|D|C|Z> [OpA] [OpB] [matrix_file]\n", argv[0]);
+        fprintf(stderr, "Example: %s 512 512 512 S N N [/path/to/matrix.bin]\n", argv[0]);
         return 1;
     }
 
@@ -233,11 +338,25 @@ int main(int argc, char **argv) {
     char prec = toupper((unsigned char)argv[4][0]);
     char opA = 'N';
     char opB = 'N';
+    const char *matrix_file = NULL;
+    
     if (argc >= 6) opA = toupper((unsigned char)argv[5][0]);
     if (argc >= 7) opB = toupper((unsigned char)argv[6][0]);
+    if (argc >= 8) matrix_file = argv[7];
 
     CBLAS_TRANSPOSE tA = parse_op(opA);
     CBLAS_TRANSPOSE tB = parse_op(opB);
+
+    // Si se proporcionó archivo de matrices, cargarlo
+    void *file_A = NULL, *file_B = NULL, *file_C = NULL;
+    if (matrix_file) {
+        char file_prec;
+        if (load_gemm_matrices_from_file(matrix_file, &M, &N, &K, &file_prec, &file_A, &file_B, &file_C) != 0) {
+            fprintf(stderr, "Fallo al cargar matrices del archivo\n");
+            return 4;
+        }
+        prec = file_prec;
+    }
 
     // Despacha a la rutina especifica segun la precision solicitada.
     double time_sec = 0.0;
@@ -250,15 +369,18 @@ int main(int argc, char **argv) {
         case 'Z': rc = run_zgemm(M, N, K, tA, tB, warmup, iters, &time_sec); break;
         default:
             fprintf(stderr, "Precision invalida: %c\n", prec);
+            free(file_A); free(file_B); free(file_C);
             return 2;
     }
 
     if (rc != 0) {
         fprintf(stderr, "Fallo al ejecutar GEMM (posible fallo de asignacion de memoria)\n");
+        free(file_A); free(file_B); free(file_C);
         return 3;
     }
 
     // Salida unica y estable para que el runner la pueda parsear.
     printf("M=%d N=%d K=%d Precision=%c OpA=%c OpB=%c Time_sec=%.9f\n", M, N, K, prec, opA, opB, time_sec);
+    free(file_A); free(file_B); free(file_C);
     return 0;
 }
