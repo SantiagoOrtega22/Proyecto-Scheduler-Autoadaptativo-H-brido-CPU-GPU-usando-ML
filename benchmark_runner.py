@@ -6,14 +6,14 @@ Orquestador de benchmarking GEMM/FFT para CPU o GPU.
 Instala `h5py` en el mismo entorno donde ejecutas este script: `python3 -m pip install h5py`.
 GUIA DE USO
 -----------
-Modo GPU (usa el binario CUDA `GEMMparametros`):
-    python3 benchmark_runner.py --device gpu --binary ./GEMMparametros
+Modo GPU (usa el binario CUDA `gemm_gpu`):
+    python3 benchmark_runner.py --device gpu --binary ./algoritmos/gemm_gpu
 
 Modo CPU (usa `gemm_cpu_mkl` u otro binario BLAS compatible):
-    python3 benchmark_runner.py --device cpu --binary ./gemm_cpu_mkl
+    python3 benchmark_runner.py --device cpu --binary ./algoritmos/gemm_cpu
 
 Barrido rapido de prueba:
-    python3 benchmark_runner.py --device cpu --binary ./gemm_cpu_mkl --sizes 128 --precisions S --output cpu_results.csv
+    python3 benchmark_runner.py --device cpu --binary ./algoritmos/gemm_cpu --sizes 128 --precisions S --output cpu_results.csv
 
 Barrido cuadrado por defecto (M=N=K):
     python3 benchmark_runner.py --device gpu
@@ -95,7 +95,7 @@ FFT_TIME_PATTERN = re.compile(
 _RAPL_WARNING_SHOWN = False
 POWER_SAMPLE_INTERVAL_SEC = 0.02
 
-DEFAULT_BENCHMARK_BANK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bench files", "benchmark_bank.h5")
+DEFAULT_BENCHMARK_BANK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bench_files", "benchmark_bank.h5")
 
 
 
@@ -1153,8 +1153,9 @@ def run_gemm(args):
                 for precision, op_a, op_b in itertools.product(precisions, op_a_list, op_b_list):
                     for device in devices:
                         done += 1
+                        binary = args.gemm_binary_gpu if device == "gpu" else args.gemm_binary_cpu
                         result = run_single_case(
-                            args.binary,
+                            binary,
                             device,
                             args.gpu_index,
                             m,
@@ -1340,7 +1341,9 @@ def main():
         default="gemm",
         help="Selecciona el benchmark a ejecutar (gemm|fft)",
     )
-    parser.add_argument("--binary", default="./GEMMparametros", help="Ruta al binario GEMM CUDA")
+    parser.add_argument("--gemm-binary-cpu", default="./algoritmos/gemm_cpu", help="Ruta al binario GEMM CPU (BLAS)")
+    parser.add_argument("--gemm-binary-gpu", default="./algoritmos/gemm_gpu", help="Ruta al binario GEMM GPU (cuBLAS)")
+    parser.add_argument("--binary", default=None, help="(Deprecado) Alias de --gemm-binary-gpu")
     parser.add_argument(
         "--device",
         choices=["gpu", "cpu", "both"],
@@ -1419,12 +1422,12 @@ def main():
 
     parser.add_argument(
         "--fft-binary-cpu",
-        default="./Asignador/fft_cpu",
+        default="./algoritmos/fft_cpu",
         help="Ruta al binario FFT CPU",
     )
     parser.add_argument(
         "--fft-binary-gpu",
-        default="./Asignador/fft_gpu",
+        default="./algoritmos/fft_gpu",
         help="Ruta al binario FFT GPU",
     )
     parser.add_argument(
@@ -1493,6 +1496,10 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # Compatibilidad: --binary sobreescribe --gemm-binary-gpu
+    if args.binary is not None:
+        args.gemm_binary_gpu = args.binary
 
     if args.benchmark == "gemm":
         run_gemm(args)

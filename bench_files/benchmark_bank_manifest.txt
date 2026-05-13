@@ -1,0 +1,134 @@
+======================================================================
+  BENCHMARK INPUT BANK — Generado: 2026-05-13T15:33:30
+  Semilla: 42   |  Archivo: benchmark_bank.h5
+======================================================================
+
+
+── GEMM ──────────────────────────────────────────────────────────────
+
+  N =   128  (128×128  =  16,384 elementos por matriz)
+    [dense_normal    ] f32  densidad A=1.0000  B=1.0000  μ_A=-0.0083  σ_A=1.0032  — N(0,1) aleatorio — referencia estándar
+    [dense_normal    ] f64  densidad A=1.0000  B=1.0000  μ_A=-0.0174  σ_A=0.9978  — N(0,1) aleatorio — referencia estándar
+    [dense_uniform   ] f32  densidad A=1.0000  B=1.0000  μ_A=0.0013  σ_A=0.5736  — Uniforme[-1,1] — sin sesgo de distribución
+    [dense_uniform   ] f64  densidad A=1.0000  B=1.0000  μ_A=0.0022  σ_A=0.5773  — Uniforme[-1,1] — sin sesgo de distribución
+    [ill_conditioned ] f32  densidad A=1.0000  B=1.0000  μ_A=1.3402  σ_A=212.6122  — Cond≈1e4 — estressa precisión FMA
+    [ill_conditioned ] f64  densidad A=1.0000  B=1.0000  μ_A=5.7477  σ_A=212.5387  — Cond≈1e4 — estressa precisión FMA
+
+  N =   256  (256×256  =  65,536 elementos por matriz)
+    [dense_normal    ] f32  densidad A=1.0000  B=1.0000  μ_A=-0.0016  σ_A=0.9977  — N(0,1) aleatorio — referencia estándar
+    [dense_normal    ] f64  densidad A=1.0000  B=1.0000  μ_A=-0.0027  σ_A=1.0022  — N(0,1) aleatorio — referencia estándar
+    [dense_uniform   ] f32  densidad A=1.0000  B=1.0000  μ_A=-0.0003  σ_A=0.5765  — Uniforme[-1,1] — sin sesgo de distribución
+    [dense_uniform   ] f64  densidad A=1.0000  B=1.0000  μ_A=-0.0016  σ_A=0.5764  — Uniforme[-1,1] — sin sesgo de distribución
+    [ill_conditioned ] f32  densidad A=1.0000  B=1.0000  μ_A=0.0190  σ_A=147.9698  — Cond≈1e4 — estressa precisión FMA
+    [ill_conditioned ] f64  densidad A=1.0000  B=1.0000  μ_A=0.3639  σ_A=147.9694  — Cond≈1e4 — estressa precisión FMA
+
+  N =   512  (512×512  =  262,144 elementos por matriz)
+    [dense_normal    ] f32  densidad A=1.0000  B=1.0000  μ_A=-0.0012  σ_A=1.0007  — N(0,1) aleatorio — referencia estándar
+    [dense_normal    ] f64  densidad A=1.0000  B=1.0000  μ_A=-0.0004  σ_A=0.9979  — N(0,1) aleatorio — referencia estándar
+    [dense_uniform   ] f32  densidad A=1.0000  B=1.0000  μ_A=0.0003  σ_A=0.5778  — Uniforme[-1,1] — sin sesgo de distribución
+    [dense_uniform   ] f64  densidad A=1.0000  B=1.0000  μ_A=0.0006  σ_A=0.5778  — Uniforme[-1,1] — sin sesgo de distribución
+    [ill_conditioned ] f32  densidad A=1.0000  B=1.0000  μ_A=0.2391  σ_A=103.7979  — Cond≈1e4 — estressa precisión FMA
+    [ill_conditioned ] f64  densidad A=1.0000  B=1.0000  μ_A=0.4509  σ_A=103.7972  — Cond≈1e4 — estressa precisión FMA
+
+  N =  1024  (1024×1024  =  1,048,576 elementos por matriz)
+    [dense_normal    ] f32  densidad A=1.0000  B=1.0000  μ_A=-0.0001  σ_A=0.9994  — N(0,1) aleatorio — referencia estándar
+    [dense_normal    ] f64  densidad A=1.0000  B=1.0000  μ_A=-0.0005  σ_A=1.0001  — N(0,1) aleatorio — referencia estándar
+    [dense_uniform   ] f32  densidad A=1.0000  B=1.0000  μ_A=-0.0005  σ_A=0.5776  — Uniforme[-1,1] — sin sesgo de distribución
+    [dense_uniform   ] f64  densidad A=1.0000  B=1.0000  μ_A=0.0002  σ_A=0.5774  — Uniforme[-1,1] — sin sesgo de distribución
+    [ill_conditioned ] f32  densidad A=1.0000  B=1.0000  μ_A=-0.0005  σ_A=73.1033  — Cond≈1e4 — estressa precisión FMA
+    [ill_conditioned ] f64  densidad A=1.0000  B=1.0000  μ_A=-0.0040  σ_A=73.1033  — Cond≈1e4 — estressa precisión FMA
+
+  N =  2048  (2048×2048  =  4,194,304 elementos por matriz)
+    [dense_normal    ] f32  densidad A=1.0000  B=1.0000  μ_A=0.0008  σ_A=0.9998  — N(0,1) aleatorio — referencia estándar
+    [dense_normal    ] f64  densidad A=1.0000  B=1.0000  μ_A=0.0004  σ_A=1.0002  — N(0,1) aleatorio — referencia estándar
+    [dense_uniform   ] f32  densidad A=1.0000  B=1.0000  μ_A=-0.0002  σ_A=0.5775  — Uniforme[-1,1] — sin sesgo de distribución
+    [dense_uniform   ] f64  densidad A=1.0000  B=1.0000  μ_A=-0.0001  σ_A=0.5774  — Uniforme[-1,1] — sin sesgo de distribución
+    [ill_conditioned ] f32  densidad A=1.0000  B=1.0000  μ_A=-0.0113  σ_A=51.5884  — Cond≈1e4 — estressa precisión FMA
+    [ill_conditioned ] f64  densidad A=1.0000  B=1.0000  μ_A=0.0059  σ_A=51.5884  — Cond≈1e4 — estressa precisión FMA
+
+  N =  4096  (4096×4096  =  16,777,216 elementos por matriz)
+    [dense_normal    ] f32  densidad A=1.0000  B=1.0000  μ_A=0.0001  σ_A=1.0001  — N(0,1) aleatorio — referencia estándar
+    [dense_normal    ] f64  densidad A=1.0000  B=1.0000  μ_A=-0.0006  σ_A=1.0000  — N(0,1) aleatorio — referencia estándar
+    [dense_uniform   ] f32  densidad A=1.0000  B=1.0000  μ_A=0.0001  σ_A=0.5773  — Uniforme[-1,1] — sin sesgo de distribución
+    [dense_uniform   ] f64  densidad A=1.0000  B=1.0000  μ_A=0.0001  σ_A=0.5774  — Uniforme[-1,1] — sin sesgo de distribución
+    [ill_conditioned ] f32  densidad A=1.0000  B=1.0000  μ_A=-0.0031  σ_A=36.4420  — Cond≈1e4 — estressa precisión FMA
+    [ill_conditioned ] f64  densidad A=1.0000  B=1.0000  μ_A=0.0073  σ_A=36.4420  — Cond≈1e4 — estressa precisión FMA
+
+
+── FFT ───────────────────────────────────────────────────────────────
+
+  N =      256  (señal 1-D)
+    [single_tone     ]  perfiles: f32, f64, c64, c128
+    [multi_tone      ]  perfiles: f32, f64, c64, c128
+    [broadband       ]  perfiles: f32, f64, c64, c128
+    [impulse_train   ]  perfiles: f32, f64, c64, c128
+    [chirp           ]  perfiles: f32, f64, c64, c128
+
+  N =      512  (señal 1-D)
+    [single_tone     ]  perfiles: f32, f64, c64, c128
+    [multi_tone      ]  perfiles: f32, f64, c64, c128
+    [broadband       ]  perfiles: f32, f64, c64, c128
+    [impulse_train   ]  perfiles: f32, f64, c64, c128
+    [chirp           ]  perfiles: f32, f64, c64, c128
+
+  N =    1,024  (señal 1-D)
+    [single_tone     ]  perfiles: f32, f64, c64, c128
+    [multi_tone      ]  perfiles: f32, f64, c64, c128
+    [broadband       ]  perfiles: f32, f64, c64, c128
+    [impulse_train   ]  perfiles: f32, f64, c64, c128
+    [chirp           ]  perfiles: f32, f64, c64, c128
+
+  N =    2,048  (señal 1-D)
+    [single_tone     ]  perfiles: f32, f64, c64, c128
+    [multi_tone      ]  perfiles: f32, f64, c64, c128
+    [broadband       ]  perfiles: f32, f64, c64, c128
+    [impulse_train   ]  perfiles: f32, f64, c64, c128
+    [chirp           ]  perfiles: f32, f64, c64, c128
+
+  N =    4,096  (señal 1-D)
+    [single_tone     ]  perfiles: f32, f64, c64, c128
+    [multi_tone      ]  perfiles: f32, f64, c64, c128
+    [broadband       ]  perfiles: f32, f64, c64, c128
+    [impulse_train   ]  perfiles: f32, f64, c64, c128
+    [chirp           ]  perfiles: f32, f64, c64, c128
+
+  N =    8,192  (señal 1-D)
+    [single_tone     ]  perfiles: f32, f64, c64, c128
+    [multi_tone      ]  perfiles: f32, f64, c64, c128
+    [broadband       ]  perfiles: f32, f64, c64, c128
+    [impulse_train   ]  perfiles: f32, f64, c64, c128
+    [chirp           ]  perfiles: f32, f64, c64, c128
+
+  N =   16,384  (señal 1-D)
+    [single_tone     ]  perfiles: f32, f64, c64, c128
+    [multi_tone      ]  perfiles: f32, f64, c64, c128
+    [broadband       ]  perfiles: f32, f64, c64, c128
+    [impulse_train   ]  perfiles: f32, f64, c64, c128
+    [chirp           ]  perfiles: f32, f64, c64, c128
+
+  N =   65,536  (señal 1-D)
+    [single_tone     ]  perfiles: f32, f64, c64, c128
+    [multi_tone      ]  perfiles: f32, f64, c64, c128
+    [broadband       ]  perfiles: f32, f64, c64, c128
+    [impulse_train   ]  perfiles: f32, f64, c64, c128
+    [chirp           ]  perfiles: f32, f64, c64, c128
+
+  N = 1,048,576  (señal 1-D)
+    [single_tone     ]  perfiles: f32, f64, c64, c128
+    [multi_tone      ]  perfiles: f32, f64, c64, c128
+    [broadband       ]  perfiles: f32, f64, c64, c128
+    [impulse_train   ]  perfiles: f32, f64, c64, c128
+    [chirp           ]  perfiles: f32, f64, c64, c128
+
+
+======================================================================
+ESTRUCTURA HDF5:
+  /gemm/N{size}/{profile}/A_f32   float32 (N×N)
+  /gemm/N{size}/{profile}/A_f64   float64 (N×N)
+  /gemm/N{size}/{profile}/B_f32   float32 (N×N)
+  /gemm/N{size}/{profile}/B_f64   float64 (N×N)
+  /fft/N{size}/{profile}/f32      float32 (N,)
+  /fft/N{size}/{profile}/f64      float64 (N,)
+  /fft/N{size}/{profile}/c64      complex64 (N,)
+  /fft/N{size}/{profile}/c128     complex128 (N,)
+======================================================================

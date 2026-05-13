@@ -1,0 +1,17 @@
+# Compilados de C/CUDA (Binarios de los algoritmos)
+algoritmos/fft_cpu
+algoritmos/fft_gpu
+algoritmos/gemm_cpu
+algoritmos/gemm_gpu
+
+# Archivos de datos autogenerados (Bancos de benchmarks)
+bench_files/*.h5
+bench_files/*.bin
+
+# Resultados de los benchmarks
+*.csv
+*.txt
+
+# Python
+__pycache__/
+*.pyc

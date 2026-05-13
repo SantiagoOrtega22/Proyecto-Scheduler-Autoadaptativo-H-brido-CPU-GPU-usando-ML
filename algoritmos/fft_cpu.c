@@ -1,5 +1,5 @@
 // fft_cpu.c
-// Compilar: gcc -O3 -o fft_cpu fft_cpu.c -lfftw3 -lfftw3f -lm
+// Compilar desde la raiz del proyecto: gcc -O3 -o algoritmos/fft_cpu algoritmos/fft_cpu.c -lfftw3 -lfftw3f -lm
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,8 +23,13 @@ typedef struct {
     char plan;
 } FftConfig;
 
+/* Forward declarations */
+static int setup_dims(const FftConfig *cfg, int dims[3]);
+static size_t product_dims(int rank, const int dims[3]);
+static size_t r2c_complex_elems(int rank, const int dims[3]);
+static size_t r2c_real_inplace_elems(int rank, const int dims[3]);
+
 static int g_fft_loaded_from_file = 0;
-static char g_fft_file_precision = '\0';
 static char g_fft_file_domain[4] = {0};
 static size_t g_fft_input_count = 0;
 static float *g_fft_input_f32 = NULL;
@@ -43,7 +48,6 @@ static void clear_loaded_fft_inputs(void) {
     g_fft_input_c64 = NULL;
     g_fft_input_count = 0;
     g_fft_loaded_from_file = 0;
-    g_fft_file_precision = '\0';
     g_fft_file_domain[0] = '\0';
 }
 
@@ -70,7 +74,6 @@ static int load_fft_from_file(const char *filename, FftConfig *cfg) {
 
     clear_loaded_fft_inputs();
     g_fft_loaded_from_file = 1;
-    g_fft_file_precision = precision;
     strncpy(g_fft_file_domain, domain, sizeof(g_fft_file_domain) - 1);
     g_fft_file_domain[sizeof(g_fft_file_domain) - 1] = '\0';
 
@@ -89,7 +92,7 @@ static int load_fft_from_file(const char *filename, FftConfig *cfg) {
     size_t nreal_inplace = r2c_real_inplace_elems(rank, dims);
 
     if (strcmp(domain, "C2C") == 0) {
-        g_fft_input_count = ncomplex * (size_t)batch;
+        g_fft_input_count = nreal * (size_t)batch;
     } else if (strcmp(domain, "R2C") == 0) {
         g_fft_input_count = nreal * (size_t)batch;
     } else if (strcmp(domain, "C2R") == 0) {
@@ -284,27 +287,38 @@ static void benchmark_fft_double(const FftConfig *cfg) {
     double flops = (strcmp(cfg->domain, "C2C") == 0 ? 5.0 : 2.5) * (double)nreal * sum_log2;
 
     if (strcmp(cfg->domain, "C2C") == 0) {
-        fftw_complex *in = (fftw_complex *)fftw_malloc(sizeof(fftw_complex) * total_complex);
+        fftw_complex *in = (fftw_complex *)fftw_malloc(sizeof(fftw_complex) * total_real);
         fftw_complex *out = NULL;
         fftw_plan plan;
 
         if (cfg->layout == 'I') {
             out = in;
         } else {
-            out = (fftw_complex *)fftw_malloc(sizeof(fftw_complex) * total_complex);
+            out = (fftw_complex *)fftw_malloc(sizeof(fftw_complex) * total_real);
         }
-
+        if (!in || (!out && cfg->layout != 'I')) {
+            fprintf(stderr, "Error: Memory allocation failed for C2C FFT\n");
+            if (in && cfg->layout != 'I') fftw_free(in);
+            if (out && cfg->layout != 'I') fftw_free(out);
+            return;
+        }
         if (g_fft_loaded_from_file && g_fft_input_c64 != NULL) {
-            memcpy(in, g_fft_input_c64, sizeof(fftw_complex) * total_complex);
+            memcpy(in, g_fft_input_c64, sizeof(fftw_complex) * total_real);
         } else {
-            fill_complex_double(in, total_complex);
+            fill_complex_double(in, total_real);
         }
-
         plan = fftw_plan_many_dft(rank, dims, cfg->batch,
                                   in, NULL, 1, (int)nreal,
                                   out, NULL, 1, (int)nreal,
                       sign, plan_flags);
-
+        if (!plan) {
+            fprintf(stderr, "Error: fftw_plan_many_dft failed\n");
+            fftw_free(in);
+            if (cfg->layout != 'I') {
+                fftw_free(out);
+            }
+            return;
+        }
         for (int i = 0; i < warmup; ++i) {
             fftw_execute(plan);
         }
@@ -362,7 +376,12 @@ static void benchmark_fft_double(const FftConfig *cfg) {
             in = (double *)fftw_malloc(sizeof(double) * total_real);
             out = (fftw_complex *)fftw_malloc(sizeof(fftw_complex) * total_complex);
         }
-
+        if (!in || (!out && cfg->layout != 'I')) {
+            fprintf(stderr, "Error: Memory allocation failed for R2C FFT\n");
+            if (in) fftw_free(in);
+            if (out && cfg->layout != 'I') fftw_free(out);
+            return;
+        }
         if (g_fft_loaded_from_file && g_fft_input_f64 != NULL) {
             size_t logical_count = total_real;
             memcpy(in, g_fft_input_f64, sizeof(double) * logical_count);
@@ -370,14 +389,24 @@ static void benchmark_fft_double(const FftConfig *cfg) {
                 memset(in + logical_count, 0, sizeof(double) * (total_real_inplace - logical_count));
             }
         } else {
-            fill_real_double(in, cfg->layout == 'I' ? total_real_inplace : total_real);
+            fill_real_double(in, total_real);
+            if (cfg->layout == 'I' && total_real_inplace > total_real) {
+                memset(in + total_real, 0, sizeof(double) * (total_real_inplace - total_real));
+            }
         }
 
         plan = fftw_plan_many_dft_r2c(rank, dims, cfg->batch,
                                       in, inembed_ptr, 1, idist,
                                       out, onembed_ptr, 1, odist,
                           plan_flags);
-
+        if (!plan) {
+            fprintf(stderr, "Error: fftw_plan_many_dft_r2c failed\n");
+            fftw_free(in);
+            if (cfg->layout != 'I') {
+                fftw_free(out);
+            }
+            return;
+        }
         for (int i = 0; i < warmup; ++i) {
             fftw_execute(plan);
         }
@@ -435,21 +464,30 @@ static void benchmark_fft_double(const FftConfig *cfg) {
             in = (fftw_complex *)fftw_malloc(sizeof(fftw_complex) * total_complex);
             out = (double *)fftw_malloc(sizeof(double) * total_real);
         }
-
+        if (!in || (!out && cfg->layout != 'I')) {
+            fprintf(stderr, "Error: Memory allocation failed for C2R FFT\n");
+            if (in && cfg->layout != 'I') fftw_free(in);
+            if (out) fftw_free(out);
+            return;
+        }
         if (g_fft_loaded_from_file && g_fft_input_c64 != NULL) {
             memcpy(in, g_fft_input_c64, sizeof(fftw_complex) * total_complex);
-            if (cfg->layout == 'I' && total_real_inplace > (size_t)(2 * total_complex)) {
-                memset(((double *)out) + (2 * total_complex), 0, sizeof(double) * (total_real_inplace - (2 * total_complex)));
-            }
         } else {
-            fill_complex_double(in, cfg->layout == 'I' ? total_complex : total_complex);
+            fill_complex_double(in, total_complex);
         }
 
         plan = fftw_plan_many_dft_c2r(rank, dims, cfg->batch,
                                       in, inembed_ptr, 1, idist,
                                       out, onembed_ptr, 1, odist,
                           plan_flags);
-
+        if (!plan) {
+            fprintf(stderr, "Error: fftw_plan_many_dft_c2r failed\n");
+            fftw_free(out);
+            if (cfg->layout != 'I') {
+                fftw_free(in);
+            }
+            return;
+        }
         for (int i = 0; i < warmup; ++i) {
             fftw_execute(plan);
         }
@@ -496,23 +534,35 @@ static void benchmark_fft_float(const FftConfig *cfg) {
     double flops = (strcmp(cfg->domain, "C2C") == 0 ? 5.0 : 2.5) * (double)nreal * sum_log2;
 
     if (strcmp(cfg->domain, "C2C") == 0) {
-        fftwf_complex *in = (fftwf_complex *)fftwf_malloc(sizeof(fftwf_complex) * total_complex);
+        fftwf_complex *in = (fftwf_complex *)fftwf_malloc(sizeof(fftwf_complex) * total_real);
         fftwf_complex *out = NULL;
         fftwf_plan plan;
 
         if (cfg->layout == 'I') {
             out = in;
         } else {
-            out = (fftwf_complex *)fftwf_malloc(sizeof(fftwf_complex) * total_complex);
+            out = (fftwf_complex *)fftwf_malloc(sizeof(fftwf_complex) * total_real);
         }
-
-        fill_complex_float(in, total_complex);
+        if (!in || (!out && cfg->layout != 'I')) {
+            fprintf(stderr, "Error: Memory allocation failed for float C2C FFT\n");
+            if (in && cfg->layout != 'I') fftwf_free(in);
+            if (out && cfg->layout != 'I') fftwf_free(out);
+            return;
+        }
+        fill_complex_float(in, total_real);
 
         plan = fftwf_plan_many_dft(rank, dims, cfg->batch,
                                    in, NULL, 1, (int)nreal,
                                    out, NULL, 1, (int)nreal,
                        sign, plan_flags);
-
+        if (!plan) {
+            fprintf(stderr, "Error: fftwf_plan_many_dft failed\n");
+            fftwf_free(in);
+            if (cfg->layout != 'I') {
+                fftwf_free(out);
+            }
+            return;
+        }
         for (int i = 0; i < warmup; ++i) {
             fftwf_execute(plan);
         }
@@ -570,14 +620,33 @@ static void benchmark_fft_float(const FftConfig *cfg) {
             in = (float *)fftwf_malloc(sizeof(float) * total_real);
             out = (fftwf_complex *)fftwf_malloc(sizeof(fftwf_complex) * total_complex);
         }
-
-        fill_real_float(in, cfg->layout == 'I' ? total_real_inplace : total_real);
+        if (!in || (!out && cfg->layout != 'I')) {
+            fprintf(stderr, "Error: Memory allocation failed for float R2C FFT\n");
+            if (in) fftwf_free(in);
+            if (out && cfg->layout != 'I') fftwf_free(out);
+            return;
+        }
+        if (g_fft_loaded_from_file && g_fft_input_f32 != NULL) {
+            // Data already loaded from file (would be from line above)
+        } else {
+            fill_real_float(in, total_real);
+            if (cfg->layout == 'I' && total_real_inplace > total_real) {
+                memset(in + total_real, 0, sizeof(float) * (total_real_inplace - total_real));
+            }
+        }
 
         plan = fftwf_plan_many_dft_r2c(rank, dims, cfg->batch,
                                        in, inembed_ptr, 1, idist,
                                        out, onembed_ptr, 1, odist,
                            plan_flags);
-
+        if (!plan) {
+            fprintf(stderr, "Error: fftwf_plan_many_dft_r2c failed\n");
+            fftwf_free(in);
+            if (cfg->layout != 'I') {
+                fftwf_free(out);
+            }
+            return;
+        }
         for (int i = 0; i < warmup; ++i) {
             fftwf_execute(plan);
         }

@@ -19,10 +19,10 @@
 
  1. COMPILACION:
     Desde la raiz del proyecto, ejecutar:
-    $ nvcc GEMMparametros.cu -O3 -lcublas -o GEMMparametros
+    $ nvcc -O3 -o algoritmos/gemm_gpu algoritmos/gemm_gpu.cu -lcublas
 
  2. EJECUCION - CASO INDIVIDUAL:
-    Sintaxis: ./GEMMparametros M N K Precision [OpA] [OpB]
+    Sintaxis: ./algoritmos/gemm_gpu M N K Precision [OpA] [OpB] [matrix_file]
     
     Parametros:
       M, N, K      : Dimensiones de la matriz (numeros positivos)
@@ -32,6 +32,7 @@
                       T = Transpose (transpone la matriz)
                       C = Conjugate (para complejos: invierte signo parte imaginaria)
                       Si se omiten, usa N,N por defecto
+      matrix_file   : [Opcional] Archivo binario con las matrices de entrada generadas por el benchmark_runner
 
     Operadores (afectan calculo: C = alpha*OpA(A)*OpB(B) + beta*C):
       - N,N: A(MxK) y B(KxN) sin cambios
@@ -42,19 +43,19 @@
 
     Ejemplos:
       # Sin transposicion (N,N) - caso base
-      $ ./GEMMparametros 256 256 256 D
+      $ ./algoritmos/gemm_gpu 256 256 256 D
       Salida: M=256 N=256 K=256 Precision=D OpA=N OpB=N Time_sec=X.XXXXX
 
       # Single precision, transpuesta en A solamente
-      $ ./GEMMparametros 512 512 512 S T N
+      $ ./algoritmos/gemm_gpu 512 512 512 S T N
       Salida: M=512 N=512 K=512 Precision=S OpA=T OpB=N Time_sec=X.XXXXX
 
       # Complex double, transposicion en ambas
-      $ ./GEMMparametros 1024 1024 1024 Z T T
+      $ ./algoritmos/gemm_gpu 1024 1024 1024 Z T T
       Salida: M=1024 N=1024 K=1024 Precision=Z OpA=T OpB=T Time_sec=X.XXXXX
 
       # Complex precision, conjugadas en ambas
-      $ ./GEMMparametros 512 512 512 C C C
+      $ ./algoritmos/gemm_gpu 512 512 512 C C C
       Salida: M=512 N=512 K=512 Precision=C OpA=C OpB=C Time_sec=X.XXXXX
 
  3. BARRIDO BASELINE (via orchestrador Python):
@@ -81,7 +82,7 @@
 */
 
 // Compilar desde la raiz del proyecto:
-// nvcc GEMMparametros.cu -O3 -lcublas -o GEMMparametros
+// nvcc gemm_gpu.cu -O3 -lcublas -o gemm_gpu
 
 #define CHECK_CUDA(call)                                                         \
     do {                                                                         \

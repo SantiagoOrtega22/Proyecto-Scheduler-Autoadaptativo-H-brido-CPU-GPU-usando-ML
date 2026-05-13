@@ -1,5 +1,5 @@
 // fft_gpu.cu
-// Compilar: nvcc -O3 -o fft_gpu fft_gpu.cu -lcufft
+// Compilar desde la raiz del proyecto: nvcc -O3 -o algoritmos/fft_gpu algoritmos/fft_gpu.cu -lcufft
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,7 +17,16 @@
     do { cufftResult r = (call); if (r != CUFFT_SUCCESS) { \
         fprintf(stderr, "cuFFT error %s:%d: %d\n", __FILE__, __LINE__, r); exit(1); } } while(0)
 
-typedef struct {
+/* Forward declaration of FftConfig */
+typedef struct FftConfig FftConfig;
+
+/* Forward declarations */
+static int setup_dims(const FftConfig *cfg, int dims[3]);
+static size_t product_dims(int rank, const int dims[3]);
+static size_t r2c_complex_elems(int rank, const int dims[3]);
+static size_t r2c_real_inplace_elems(int rank, const int dims[3]);
+
+typedef struct FftConfig {
     int nx;
     int ny;
     int nz;
@@ -29,10 +38,9 @@ typedef struct {
     char direction;
     char layout;
     char plan;
-} FftConfig;
+} FftConfig;  // Note: already declared as typedef struct FftConfig above
 
 static int g_fft_loaded_from_file = 0;
-static char g_fft_file_precision = '\0';
 static char g_fft_file_domain[4] = {0};
 static size_t g_fft_input_count = 0;
 static float *g_fft_input_f32 = NULL;
@@ -51,7 +59,6 @@ static void clear_loaded_fft_inputs(void) {
     g_fft_input_c64 = NULL;
     g_fft_input_count = 0;
     g_fft_loaded_from_file = 0;
-    g_fft_file_precision = '\0';
     g_fft_file_domain[0] = '\0';
 }
 
@@ -78,7 +85,6 @@ static int load_fft_from_file(const char *filename, FftConfig *cfg) {
 
     clear_loaded_fft_inputs();
     g_fft_loaded_from_file = 1;
-    g_fft_file_precision = precision;
     strncpy(g_fft_file_domain, domain, sizeof(g_fft_file_domain) - 1);
     g_fft_file_domain[sizeof(g_fft_file_domain) - 1] = '\0';
 
@@ -96,7 +102,7 @@ static int load_fft_from_file(const char *filename, FftConfig *cfg) {
     size_t ncomplex = r2c_complex_elems(rank, dims);
 
     if (strcmp(domain, "C2C") == 0) {
-        g_fft_input_count = ncomplex * (size_t)batch;
+        g_fft_input_count = nreal * (size_t)batch;
     } else if (strcmp(domain, "R2C") == 0) {
         g_fft_input_count = nreal * (size_t)batch;
     } else if (strcmp(domain, "C2R") == 0) {
@@ -341,25 +347,25 @@ static void benchmark_fft_float(const FftConfig *cfg) {
     CHECK_CUDA(cudaEventCreate(&stop));
 
     if (strcmp(cfg->domain, "C2C") == 0) {
-        cufftComplex *h_in = (cufftComplex *)malloc(sizeof(cufftComplex) * total_complex);
+        cufftComplex *h_in = (cufftComplex *)malloc(sizeof(cufftComplex) * total_real);
         if (g_fft_loaded_from_file && g_fft_input_c32 != NULL) {
-            memcpy(h_in, g_fft_input_c32, sizeof(cufftComplex) * total_complex);
+            memcpy(h_in, g_fft_input_c32, sizeof(cufftComplex) * total_real);
         } else {
-            fill_complex_float(h_in, total_complex);
+            fill_complex_float(h_in, total_real);
         }
 
         cufftComplex *d_in = NULL;
         cufftComplex *d_out = NULL;
 
         if (cfg->layout == 'I') {
-            CHECK_CUDA(cudaMalloc(&d_in, sizeof(cufftComplex) * total_complex));
+            CHECK_CUDA(cudaMalloc(&d_in, sizeof(cufftComplex) * total_real));
             d_out = d_in;
         } else {
-            CHECK_CUDA(cudaMalloc(&d_in, sizeof(cufftComplex) * total_complex));
-            CHECK_CUDA(cudaMalloc(&d_out, sizeof(cufftComplex) * total_complex));
+            CHECK_CUDA(cudaMalloc(&d_in, sizeof(cufftComplex) * total_real));
+            CHECK_CUDA(cudaMalloc(&d_out, sizeof(cufftComplex) * total_real));
         }
 
-        CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftComplex) * total_complex, cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftComplex) * total_real, cudaMemcpyHostToDevice));
 
         for (int i = 0; i < warmup; ++i) {
             CHECK_CUFFT(cufftExecC2C(plan, d_in, d_out, dir));
@@ -397,7 +403,8 @@ static void benchmark_fft_float(const FftConfig *cfg) {
     }
 
     if (strcmp(cfg->domain, "R2C") == 0) {
-        float *h_in = (float *)malloc(sizeof(float) * total_real);
+        size_t h_alloc_r2c = (cfg->layout == 'I') ? total_real_inplace : total_real;
+        float *h_in = (float *)malloc(sizeof(float) * h_alloc_r2c);
         if (g_fft_loaded_from_file && g_fft_input_f32 != NULL) {
             memcpy(h_in, g_fft_input_f32, sizeof(float) * total_real);
             if (cfg->layout == 'I' && total_real_inplace > total_real) {
@@ -405,6 +412,9 @@ static void benchmark_fft_float(const FftConfig *cfg) {
             }
         } else {
             fill_real_float(h_in, total_real);
+            if (cfg->layout == 'I' && total_real_inplace > total_real) {
+                memset(h_in + total_real, 0, sizeof(float) * (total_real_inplace - total_real));
+            }
         }
 
         float *d_in = NULL;
@@ -460,7 +470,7 @@ static void benchmark_fft_float(const FftConfig *cfg) {
         if (g_fft_loaded_from_file && g_fft_input_c32 != NULL) {
             memcpy(h_in, g_fft_input_c32, sizeof(cufftComplex) * total_complex);
             if (cfg->layout == 'I' && total_real_inplace > (size_t)(2 * total_complex)) {
-                memset(((float *)out) + (2 * total_complex), 0, sizeof(float) * (total_real_inplace - (2 * total_complex)));
+                memset(((float *)h_in) + (2 * total_complex), 0, sizeof(float) * (total_real_inplace - (2 * total_complex)));
             }
         } else {
             fill_complex_float(h_in, total_complex);
@@ -594,25 +604,25 @@ static void benchmark_fft_double(const FftConfig *cfg) {
     CHECK_CUDA(cudaEventCreate(&stop));
 
     if (strcmp(cfg->domain, "C2C") == 0) {
-        cufftDoubleComplex *h_in = (cufftDoubleComplex *)malloc(sizeof(cufftDoubleComplex) * total_complex);
+        cufftDoubleComplex *h_in = (cufftDoubleComplex *)malloc(sizeof(cufftDoubleComplex) * total_real);
         if (g_fft_loaded_from_file && g_fft_input_c64 != NULL) {
-            memcpy(h_in, g_fft_input_c64, sizeof(cufftDoubleComplex) * total_complex);
+            memcpy(h_in, g_fft_input_c64, sizeof(cufftDoubleComplex) * total_real);
         } else {
-            fill_complex_double(h_in, total_complex);
+            fill_complex_double(h_in, total_real);
         }
 
         cufftDoubleComplex *d_in = NULL;
         cufftDoubleComplex *d_out = NULL;
 
         if (cfg->layout == 'I') {
-            CHECK_CUDA(cudaMalloc(&d_in, sizeof(cufftDoubleComplex) * total_complex));
+            CHECK_CUDA(cudaMalloc(&d_in, sizeof(cufftDoubleComplex) * total_real));
             d_out = d_in;
         } else {
-            CHECK_CUDA(cudaMalloc(&d_in, sizeof(cufftDoubleComplex) * total_complex));
-            CHECK_CUDA(cudaMalloc(&d_out, sizeof(cufftDoubleComplex) * total_complex));
+            CHECK_CUDA(cudaMalloc(&d_in, sizeof(cufftDoubleComplex) * total_real));
+            CHECK_CUDA(cudaMalloc(&d_out, sizeof(cufftDoubleComplex) * total_real));
         }
 
-        CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftDoubleComplex) * total_complex, cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftDoubleComplex) * total_real, cudaMemcpyHostToDevice));
 
         for (int i = 0; i < warmup; ++i) {
             CHECK_CUFFT(cufftExecZ2Z(plan, d_in, d_out, dir));
@@ -650,7 +660,8 @@ static void benchmark_fft_double(const FftConfig *cfg) {
     }
 
     if (strcmp(cfg->domain, "R2C") == 0) {
-        double *h_in = (double *)malloc(sizeof(double) * total_real);
+        size_t h_alloc_r2c = (cfg->layout == 'I') ? total_real_inplace : total_real;
+        double *h_in = (double *)malloc(sizeof(double) * h_alloc_r2c);
         if (g_fft_loaded_from_file && g_fft_input_f64 != NULL) {
             memcpy(h_in, g_fft_input_f64, sizeof(double) * total_real);
             if (cfg->layout == 'I' && total_real_inplace > total_real) {
@@ -658,6 +669,9 @@ static void benchmark_fft_double(const FftConfig *cfg) {
             }
         } else {
             fill_real_double(h_in, total_real);
+            if (cfg->layout == 'I' && total_real_inplace > total_real) {
+                memset(h_in + total_real, 0, sizeof(double) * (total_real_inplace - total_real));
+            }
         }
 
         double *d_in = NULL;
@@ -713,7 +727,7 @@ static void benchmark_fft_double(const FftConfig *cfg) {
         if (g_fft_loaded_from_file && g_fft_input_c64 != NULL) {
             memcpy(h_in, g_fft_input_c64, sizeof(cufftDoubleComplex) * total_complex);
             if (cfg->layout == 'I' && total_real_inplace > (size_t)(2 * total_complex)) {
-                memset(((double *)out) + (2 * total_complex), 0, sizeof(double) * (total_real_inplace - (2 * total_complex)));
+                memset(((double *)h_in) + (2 * total_complex), 0, sizeof(double) * (total_real_inplace - (2 * total_complex)));
             }
         } else {
             fill_complex_double(h_in, total_complex);

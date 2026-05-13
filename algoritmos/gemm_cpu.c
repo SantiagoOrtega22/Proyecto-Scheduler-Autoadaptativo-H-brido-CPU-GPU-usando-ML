@@ -1,5 +1,5 @@
 /*
- * gemm_cpu_mkl.c
+ * gemm_cpu.c
  *
  * Benchmark de GEMM para CPU basado en BLAS, compatible con MKL u OpenBLAS.
  * Soporta las cuatro precisiones usadas en el proyecto:
@@ -8,18 +8,20 @@
  *   C -> float compleja
  *   Z -> double compleja
  *
- * El objetivo es mantener la misma interfaz que el binario CUDA `GEMMparametros`
+ * El objetivo es mantener la misma interfaz que el binario CUDA `gemm_gpu`
  * para que `benchmark_runner.py` pueda ejecutar CPU o GPU con el mismo esquema
  * de parametros y leer la misma salida parseable.
  *
  * ------------------------------------------------------------
  * GUIA DE COMPILACION
  * ------------------------------------------------------------
- * Opcion 1: MKL
- *   gcc -O3 -march=native -o gemm_cpu_mkl gemm_cpu_mkl.c -lmkl_rt -lpthread -lm
+ * Desde la raiz del proyecto:
  *
- * Opcion 2: OpenBLAS
- *   gcc -O3 -march=native -o gemm_cpu_mkl gemm_cpu_mkl.c -I/usr/include/openblas -lopenblas -lm
+ * Opcion 1: OpenBLAS (Recomendado/Default)
+ *   gcc -O3 -march=native -o algoritmos/gemm_cpu algoritmos/gemm_cpu.c -I/usr/include/openblas -lopenblas -lm
+ *
+ * Opcion 2: MKL
+ *   gcc -O3 -march=native -o algoritmos/gemm_cpu algoritmos/gemm_cpu.c -lmkl_rt -lpthread -lm
  *
  * Si tu sistema no encuentra cblas.h, revisa que el paquete de desarrollo de BLAS
  * este instalado o ajusta la ruta de include con -I.
@@ -28,13 +30,14 @@
  * GUIA DE EJECUCION
  * ------------------------------------------------------------
  * Sintaxis general:
- *   ./gemm_cpu_mkl M N K <S|D|C|Z> [OpA] [OpB]
+ *   ./algoritmos/gemm_cpu M N K <S|D|C|Z> [OpA] [OpB] [matrix_file]
  *
  * Argumentos:
- *   M, N, K   -> dimensiones del producto C = A * B
- *   Precision -> S, D, C o Z
- *   OpA       -> N, T o C para la matriz A
- *   OpB       -> N, T o C para la matriz B
+ *   M, N, K     -> dimensiones del producto C = A * B
+ *   Precision   -> S, D, C o Z
+ *   OpA         -> N, T o C para la matriz A
+ *   OpB         -> N, T o C para la matriz B
+ *   matrix_file -> [Opcional] Archivo binario con matrices de entrada generadas por benchmark_runner
  *
  * Operaciones:
  *   N = No transpose
@@ -42,13 +45,13 @@
  *   C = Conjugate transpose
  *
  * Ejemplos de uso:
- *   ./gemm_cpu_mkl 128 128 128 S N N
- *   ./gemm_cpu_mkl 256 256 256 D T N
- *   ./gemm_cpu_mkl 512 256 128 C N T
- *   ./gemm_cpu_mkl 1024 1024 1024 Z C C
+ *   ./algoritmos/gemm_cpu 128 128 128 S N N
+ *   ./algoritmos/gemm_cpu 256 256 256 D T N
+ *   ./algoritmos/gemm_cpu 512 256 128 C N T
+ *   ./algoritmos/gemm_cpu 1024 1024 1024 Z C C
  *
  * Ejemplo para barrido desde el runner:
- *   python3 benchmark_runner.py --device cpu --binary ./gemm_cpu_mkl \
+ *   python3 benchmark_runner.py --benchmark gemm --device cpu \
  *       --sizes 128,256,512 --precisions S,D,C,Z --output cpu_results.csv
  *
  * ------------------------------------------------------------
