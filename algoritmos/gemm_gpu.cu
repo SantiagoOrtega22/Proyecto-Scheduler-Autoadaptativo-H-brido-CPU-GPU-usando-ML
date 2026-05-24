@@ -1,3 +1,27 @@
+/**
+ * @file gemm_gpu.cu
+ * @brief Benchmark implementation for GEMM (General Matrix Multiplication) on GPU.
+ *
+ * This file contains the implementation of a CUDA-based benchmark that leverages
+ * NVIDIA's cuBLAS library to execute General Matrix Multiplication (GEMM) for different
+ * data types and precisions:
+ *   - SGEMM (Single Precision Real Float)
+ *   - DGEMM (Double Precision Real Float)
+ *   - CGEMM (Single Precision Complex Float)
+ *   - ZGEMM (Double Precision Complex Float)
+ *
+ * The benchmark enforces rigorous HPC measurement protocols, including:
+ *   - Warm-up executions to stabilize GPU clock speeds.
+ *   - Explicit synchronization (cudaDeviceSynchronize) to ensure timing accuracy.
+ *   - Clean resource management to isolate execution costs and avoid OOM issues.
+ *
+ * Compilation instructions:
+ *   nvcc -O3 -o algoritmos/gemm_gpu algoritmos/gemm_gpu.cu -lcublas
+ *
+ * Usage:
+ *   ./algoritmos/gemm_gpu --m <M> --n <N> --k <K> --precision <S|D|C|Z> --source <matrix_file>
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,6 +33,12 @@
 #include <cublas_v2.h>
 #include <cuComplex.h>
 
+/**
+ * @brief Macro to check CUDA runtime API errors.
+ *
+ * Evaluates a CUDA runtime API call. If the call fails, prints an error message
+ * with the file name and line number to stderr and returns 1 from the enclosing function.
+ */
 #define CHECK_CUDA(call)                                                             \
 	do {                                                                             \
 		cudaError_t cuda_error = (call);                                             \
@@ -19,6 +49,12 @@
 		}                                                                            \
 	} while (0)
 
+/**
+ * @brief Macro to check cuBLAS library API errors.
+ *
+ * Evaluates a cuBLAS API call. If the call fails, prints an error message
+ * with the file name, line number, and error status code to stderr, then returns 1.
+ */
 #define CHECK_CUBLAS(call)                                                           \
 	do {                                                                             \
 		cublasStatus_t cublas_status = (call);                                       \
@@ -32,34 +68,75 @@
 #define GEMM_WARMUP_RUNS 4
 #define GEMM_MEASURE_ITERS 1
 
+/**
+ * @struct GemmCli
+ * @brief Configuration parameters parsed from command-line arguments.
+ *
+ * Holds all user-specified benchmark execution choices, including matrix
+ * dimensions, precision types, transposition settings, and execution options.
+ */
 typedef struct {
-	int m;
-	int n;
-	int k;
-	char precision;
-	char op_a;
-	char op_b;
-	const char *source_path;
-	int warmup_runs;
-	int iters;
+	int m;                  /**< Row count of matrices A and C. */
+	int n;                  /**< Column count of matrices B and C. */
+	int k;                  /**< Column count of matrix A and row count of matrix B. */
+	char precision;         /**< Precision code ('S', 'D', 'C', 'Z'). */
+	char op_a;              /**< Matrix A transpose setting ('N', 'T', 'C'). */
+	char op_b;              /**< Matrix B transpose setting ('N', 'T', 'C'). */
+	const char *source_path;/**< Binary file path to load matrix data from. */
+	int warmup_runs;        /**< Number of warm-up iterations to run. */
+	int iters;              /**< Number of measured timing iterations. */
 } GemmCli;
 
+/**
+ * @struct GemmInput
+ * @brief Memory representation of the loaded input matrices on the host.
+ *
+ * Contains matrix sizes, precision identifier, and pointers to the raw matrix
+ * data buffers allocated in host memory.
+ */
 typedef struct {
-	int m;
-	int n;
-	int k;
-	char precision;
-	void *a;
-	void *b;
-	void *c;
+	int m;                  /**< Matrix dimension M. */
+	int n;                  /**< Matrix dimension N. */
+	int k;                  /**< Matrix dimension K. */
+	char precision;         /**< Loaded precision code ('S', 'D', 'C', 'Z'). */
+	void *a;                /**< Host memory pointer for matrix A. */
+	void *b;                /**< Host memory pointer for matrix B. */
+	void *c;                /**< Host memory pointer for matrix C. */
 } GemmInput;
 
+/**
+ * Retrieves the current monotonic system time in seconds.
+ *
+ * Uses the POSIX high-resolution CLOCK_MONOTONIC timer to acquire accurate
+ * host-side timings.
+ *
+ * Args:
+ *     None.
+ *
+ * Returns:
+ *     double: Monotonic time in seconds.
+ */
 static double monotonic_time_sec(void) {
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
+/**
+ * Validates and normalizes the precision character to uppercase.
+ *
+ * Supported character codes:
+ *   - 'S': Single precision float.
+ *   - 'D': Double precision float.
+ *   - 'C': Complex single precision float.
+ *   - 'Z': Complex double precision float.
+ *
+ * Args:
+ *     precision (char): Raw precision code from command-line.
+ *
+ * Returns:
+ *     char: Uppercase validated code, or '\0' if invalid.
+ */
 static char normalize_precision(char precision) {
 	precision = (char)toupper((unsigned char)precision);
 	if (precision != 'S' && precision != 'D' && precision != 'C' && precision != 'Z') {
@@ -68,6 +145,20 @@ static char normalize_precision(char precision) {
 	return precision;
 }
 
+/**
+ * Validates and normalizes the matrix transposition operation code.
+ *
+ * Supported character codes:
+ *   - 'N': Normal (no transpose).
+ *   - 'T': Transpose.
+ *   - 'C': Conjugate transpose.
+ *
+ * Args:
+ *     op (char): Raw operation character code.
+ *
+ * Returns:
+ *     char: Uppercase validated operation, or '\0' if invalid.
+ */
 static char normalize_op(char op) {
 	op = (char)toupper((unsigned char)op);
 	if (op != 'N' && op != 'T' && op != 'C') {
@@ -76,6 +167,19 @@ static char normalize_op(char op) {
 	return op;
 }
 
+/**
+ * Maps the operation and precision character to the corresponding cuBLAS enum.
+ *
+ * Real floating point precisions ('S', 'D') do not contain imaginary components,
+ * meaning a conjugate transpose ('C') is mapped to standard transpose (CUBLAS_OP_T).
+ *
+ * Args:
+ *     op (char): Matrix transposition operation setting ('N', 'T', 'C').
+ *     precision (char): Matrix precision identifier ('S', 'D', 'C', 'Z').
+ *
+ * Returns:
+ *     cublasOperation_t: Associated cuBLAS operation enum type.
+ */
 static cublasOperation_t to_cublas_op(char op, char precision) {
 	op = normalize_op(op);
 	if (op == '\0') {
@@ -93,6 +197,18 @@ static cublasOperation_t to_cublas_op(char op, char precision) {
 	return CUBLAS_OP_C;
 }
 
+/**
+ * Frees host memory allocations inside a GemmInput structure.
+ *
+ * Deallocates host buffers for matrices A, B, and C, and nullifies pointers to
+ * prevent dangling references.
+ *
+ * Args:
+ *     input (GemmInput *): Pointer to the input structure containing allocations.
+ *
+ * Returns:
+ *     void.
+ */
 static void free_gemm_input(GemmInput *input) {
 	if (!input) {
 		return;
@@ -105,10 +221,39 @@ static void free_gemm_input(GemmInput *input) {
 	input->c = NULL;
 }
 
+/**
+ * Reads an exact count of items from the binary matrix file.
+ *
+ * Wrapper around standard fread to guarantee that all requested elements are
+ * successfully read before returning.
+ *
+ * Args:
+ *     file (FILE *): Pointer to file stream.
+ *     ptr (void *): Memory buffer to write data to.
+ *     size (size_t): Byte size of each element.
+ *     count (size_t): Number of elements to read.
+ *
+ * Returns:
+ *     int: 0 on success, -1 if the exact element count cannot be read.
+ */
 static int read_exact(FILE *file, void *ptr, size_t size, size_t count) {
 	return fread(ptr, size, count, file) == count ? 0 : -1;
 }
 
+/**
+ * Parses and loads the GEMM dimensions and data from a binary input file.
+ *
+ * Reads header specifications (M, N, K, and precision), validates metadata,
+ * allocates appropriate host-side arrays, and streams the binary matrices into
+ * host memory.
+ *
+ * Args:
+ *     path (const char *): Path to the matrix binary file.
+ *     input (GemmInput *): Pointer to structural container to hold dimensions and pointers.
+ *
+ * Returns:
+ *     int: 0 on success, -1 on allocation, validation, or stream read error.
+ */
 static int load_gemm_input_from_file(const char *path, GemmInput *input) {
 	FILE *file = fopen(path, "rb");
 	if (!file) {
@@ -269,6 +414,18 @@ static int load_gemm_input_from_file(const char *path, GemmInput *input) {
 	return 0;
 }
 
+/**
+ * Parses the precision character from a GEMM variation name.
+ *
+ * Maps function names like "sgemm" or prefix flags to their uppercase precision char.
+ *
+ * Args:
+ *     name (const char *): GEMM function name string.
+ *     out_precision (char *): Pointer to output character destination.
+ *
+ * Returns:
+ *     int: 0 on success, -1 on invalid name.
+ */
 static int parse_function_name(const char *name, char *out_precision) {
 	if (!name || !out_precision) {
 		return -1;
@@ -294,6 +451,20 @@ static int parse_function_name(const char *name, char *out_precision) {
 	return -1;
 }
 
+/**
+ * Parses CLI configuration parameters.
+ *
+ * Orchestrates parsing flag options and legacy positional options into the
+ * config object.
+ *
+ * Args:
+ *     argc (int): Argument count.
+ *     argv (char **): Command line arguments.
+ *     cli (GemmCli *): CLI config target structure.
+ *
+ * Returns:
+ *     int: 0 on success, 2 if help was invoked, -1 on format errors.
+ */
 static int parse_cli(int argc, char **argv, GemmCli *cli) {
 	memset(cli, 0, sizeof(*cli));
 	cli->precision = '\0';
@@ -438,6 +609,24 @@ static int parse_cli(int argc, char **argv, GemmCli *cli) {
 	return 0;
 }
 
+/**
+ * Runs a single-precision floating-point GEMM (SGEMM) benchmark on the GPU.
+ *
+ * Performs host-to-device transfers, executes warm-up runs, synchronizes CUDA,
+ * measures execution times, and downloads computed results to host.
+ *
+ * Args:
+ *     handle (cublasHandle_t): Library handle.
+ *     input (const GemmInput *): Loaded host matrix containers.
+ *     op_a (char): Transpose setting for A.
+ *     op_b (char): Transpose setting for B.
+ *     warmup_runs (int): Number of stabilization iterations.
+ *     iters (int): Number of measured iterations.
+ *     out_time_sec (double *): Output pointer to store average run-time.
+ *
+ * Returns:
+ *     int: 0 on success, non-zero on CUDA/cuBLAS failure.
+ */
 static int run_sgemm_case(
 	cublasHandle_t handle,
 	const GemmInput *input,
@@ -460,27 +649,35 @@ static int run_sgemm_case(
 	const float alpha = 1.0f;
 	const float beta = 0.0f;
 
+	// HPC Rigor: Allocate device memory for matrices A, B, and C
 	CHECK_CUDA(cudaMalloc((void **)&d_a, a_bytes));
 	CHECK_CUDA(cudaMalloc((void **)&d_b, b_bytes));
 	CHECK_CUDA(cudaMalloc((void **)&d_c, c_bytes));
 
+	// HPC Rigor: Warm-up phase to stabilize GPU clock speeds and initialize cuBLAS libraries
 	for (int i = 0; i < warmup_runs; ++i) {
 		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUBLAS(cublasSgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
 								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
+		// Explicit synchronization to ensure the current iteration finishes before copying back
 		CHECK_CUDA(cudaDeviceSynchronize());
 		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
 	}
 
+	// Explicit synchronization: Ensure all warm-up tasks have completely finished prior to timing
+	CHECK_CUDA(cudaDeviceSynchronize());
 	double start = monotonic_time_sec();
+	
+	// Timed execution phase
 	for (int i = 0; i < iters; ++i) {
 		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUBLAS(cublasSgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
 								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
+		// Explicit synchronization: Ensure the GPU finishes execution before measuring the end time
 		CHECK_CUDA(cudaDeviceSynchronize());
 		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
 	}
@@ -488,12 +685,31 @@ static int run_sgemm_case(
 
 	*out_time_sec = (end - start) / (double)iters;
 
+	// HPC Rigor: Clean up allocated GPU resources to prevent memory leaks during sweeps
 	cudaFree(d_a);
 	cudaFree(d_b);
 	cudaFree(d_c);
 	return 0;
 }
 
+/**
+ * Runs a double-precision floating-point GEMM (DGEMM) benchmark on the GPU.
+ *
+ * Performs host-to-device transfers, executes warm-up runs, synchronizes CUDA,
+ * measures execution times, and downloads computed results to host.
+ *
+ * Args:
+ *     handle (cublasHandle_t): Library handle.
+ *     input (const GemmInput *): Loaded host matrix containers.
+ *     op_a (char): Transpose setting for A.
+ *     op_b (char): Transpose setting for B.
+ *     warmup_runs (int): Number of stabilization iterations.
+ *     iters (int): Number of measured iterations.
+ *     out_time_sec (double *): Output pointer to store average run-time.
+ *
+ * Returns:
+ *     int: 0 on success, non-zero on CUDA/cuBLAS failure.
+ */
 static int run_dgemm_case(
 	cublasHandle_t handle,
 	const GemmInput *input,
@@ -516,27 +732,35 @@ static int run_dgemm_case(
 	const double alpha = 1.0;
 	const double beta = 0.0;
 
+	// HPC Rigor: Allocate device memory for matrices A, B, and C
 	CHECK_CUDA(cudaMalloc((void **)&d_a, a_bytes));
 	CHECK_CUDA(cudaMalloc((void **)&d_b, b_bytes));
 	CHECK_CUDA(cudaMalloc((void **)&d_c, c_bytes));
 
+	// HPC Rigor: Warm-up phase to stabilize GPU clock speeds and initialize cuBLAS libraries
 	for (int i = 0; i < warmup_runs; ++i) {
 		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUBLAS(cublasDgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
 								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
+		// Explicit synchronization to ensure the current iteration finishes before copying back
 		CHECK_CUDA(cudaDeviceSynchronize());
 		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
 	}
 
+	// Explicit synchronization: Ensure all warm-up tasks have completely finished prior to timing
+	CHECK_CUDA(cudaDeviceSynchronize());
 	double start = monotonic_time_sec();
+	
+	// Timed execution phase
 	for (int i = 0; i < iters; ++i) {
 		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUBLAS(cublasDgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
 								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
+		// Explicit synchronization: Ensure the GPU finishes execution before measuring the end time
 		CHECK_CUDA(cudaDeviceSynchronize());
 		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
 	}
@@ -544,12 +768,31 @@ static int run_dgemm_case(
 
 	*out_time_sec = (end - start) / (double)iters;
 
+	// HPC Rigor: Clean up allocated GPU resources to prevent memory leaks during sweeps
 	cudaFree(d_a);
 	cudaFree(d_b);
 	cudaFree(d_c);
 	return 0;
 }
 
+/**
+ * Runs a single-precision complex GEMM (CGEMM) benchmark on the GPU.
+ *
+ * Performs host-to-device transfers, executes warm-up runs, synchronizes CUDA,
+ * measures execution times, and downloads computed results to host.
+ *
+ * Args:
+ *     handle (cublasHandle_t): Library handle.
+ *     input (const GemmInput *): Loaded host matrix containers.
+ *     op_a (char): Transpose setting for A.
+ *     op_b (char): Transpose setting for B.
+ *     warmup_runs (int): Number of stabilization iterations.
+ *     iters (int): Number of measured iterations.
+ *     out_time_sec (double *): Output pointer to store average run-time.
+ *
+ * Returns:
+ *     int: 0 on success, non-zero on CUDA/cuBLAS failure.
+ */
 static int run_cgemm_case(
 	cublasHandle_t handle,
 	const GemmInput *input,
@@ -572,27 +815,35 @@ static int run_cgemm_case(
 	const cuComplex alpha = make_cuComplex(1.0f, 0.0f);
 	const cuComplex beta = make_cuComplex(0.0f, 0.0f);
 
+	// HPC Rigor: Allocate device memory for matrices A, B, and C
 	CHECK_CUDA(cudaMalloc((void **)&d_a, a_bytes));
 	CHECK_CUDA(cudaMalloc((void **)&d_b, b_bytes));
 	CHECK_CUDA(cudaMalloc((void **)&d_c, c_bytes));
 
+	// HPC Rigor: Warm-up phase to stabilize GPU clock speeds and initialize cuBLAS libraries
 	for (int i = 0; i < warmup_runs; ++i) {
 		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUBLAS(cublasCgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
 								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
+		// Explicit synchronization to ensure the current iteration finishes before copying back
 		CHECK_CUDA(cudaDeviceSynchronize());
 		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
 	}
 
+	// Explicit synchronization: Ensure all warm-up tasks have completely finished prior to timing
+	CHECK_CUDA(cudaDeviceSynchronize());
 	double start = monotonic_time_sec();
+	
+	// Timed execution phase
 	for (int i = 0; i < iters; ++i) {
 		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUBLAS(cublasCgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
 								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
+		// Explicit synchronization: Ensure the GPU finishes execution before measuring the end time
 		CHECK_CUDA(cudaDeviceSynchronize());
 		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
 	}
@@ -600,12 +851,31 @@ static int run_cgemm_case(
 
 	*out_time_sec = (end - start) / (double)iters;
 
+	// HPC Rigor: Clean up allocated GPU resources to prevent memory leaks during sweeps
 	cudaFree(d_a);
 	cudaFree(d_b);
 	cudaFree(d_c);
 	return 0;
 }
 
+/**
+ * Runs a double-precision complex GEMM (ZGEMM) benchmark on the GPU.
+ *
+ * Performs host-to-device transfers, executes warm-up runs, synchronizes CUDA,
+ * measures execution times, and downloads computed results to host.
+ *
+ * Args:
+ *     handle (cublasHandle_t): Library handle.
+ *     input (const GemmInput *): Loaded host matrix containers.
+ *     op_a (char): Transpose setting for A.
+ *     op_b (char): Transpose setting for B.
+ *     warmup_runs (int): Number of stabilization iterations.
+ *     iters (int): Number of measured iterations.
+ *     out_time_sec (double *): Output pointer to store average run-time.
+ *
+ * Returns:
+ *     int: 0 on success, non-zero on CUDA/cuBLAS failure.
+ */
 static int run_zgemm_case(
 	cublasHandle_t handle,
 	const GemmInput *input,
@@ -628,27 +898,35 @@ static int run_zgemm_case(
 	const cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
 	const cuDoubleComplex beta = make_cuDoubleComplex(0.0, 0.0);
 
+	// HPC Rigor: Allocate device memory for matrices A, B, and C
 	CHECK_CUDA(cudaMalloc((void **)&d_a, a_bytes));
 	CHECK_CUDA(cudaMalloc((void **)&d_b, b_bytes));
 	CHECK_CUDA(cudaMalloc((void **)&d_c, c_bytes));
 
+	// HPC Rigor: Warm-up phase to stabilize GPU clock speeds and initialize cuBLAS libraries
 	for (int i = 0; i < warmup_runs; ++i) {
 		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUBLAS(cublasZgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
 								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
+		// Explicit synchronization to ensure the current iteration finishes before copying back
 		CHECK_CUDA(cudaDeviceSynchronize());
 		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
 	}
 
+	// Explicit synchronization: Ensure all warm-up tasks have completely finished prior to timing
+	CHECK_CUDA(cudaDeviceSynchronize());
 	double start = monotonic_time_sec();
+	
+	// Timed execution phase
 	for (int i = 0; i < iters; ++i) {
 		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUBLAS(cublasZgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
 								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
+		// Explicit synchronization: Ensure the GPU finishes execution before measuring the end time
 		CHECK_CUDA(cudaDeviceSynchronize());
 		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
 	}
@@ -656,12 +934,25 @@ static int run_zgemm_case(
 
 	*out_time_sec = (end - start) / (double)iters;
 
+	// HPC Rigor: Clean up allocated GPU resources to prevent memory leaks during sweeps
 	cudaFree(d_a);
 	cudaFree(d_b);
 	cudaFree(d_c);
 	return 0;
 }
 
+/**
+ * Prints the program's usage guidelines to standard error.
+ *
+ * Explains positional parameter inputs (legacy mode), option flags,
+ * and helper function aliases.
+ *
+ * Args:
+ *     program (const char *): Executable name (typically argv[0]).
+ *
+ * Returns:
+ *     int: Exit code (returns 2).
+ */
 static int print_usage(const char *program) {
 	fprintf(stderr, "Uso legacy: %s M N K <S|D|C|Z> [OpA] [OpB] [matrix_file]\n", program);
 	fprintf(stderr, "Modo flags: %s --m M --n N --k K --precision S --op-a N --op-b N --source matrices.bin\n", program);
@@ -669,6 +960,20 @@ static int print_usage(const char *program) {
 	return 2;
 }
 
+/**
+ * Main benchmark execution orchestrator.
+ *
+ * Parses arguments, loads matrices, initializes the CUDA device, instantiates
+ * the cuBLAS library handle, invokes the corresponding GEMM runner, and prints
+ * output statistics.
+ *
+ * Args:
+ *     argc (int): Number of command line arguments.
+ *     argv (char **): Array of command line argument strings.
+ *
+ * Returns:
+ *     int: 0 on success; 1 on CUDA, validation, or loading failure; 2 on usage errors.
+ */
 int main(int argc, char **argv) {
 	GemmCli cli;
 	int parse_rc = parse_cli(argc, argv, &cli);
@@ -691,6 +996,7 @@ int main(int argc, char **argv) {
 		fprintf(stderr, "Aviso: la precision del archivo de matrices sobreescribe la del CLI\n");
 	}
 
+	// Initialize CUDA device and cuBLAS library context
 	cublasHandle_t handle = NULL;
 	CHECK_CUDA(cudaSetDevice(0));
 	CHECK_CUBLAS(cublasCreate(&handle));
@@ -698,6 +1004,7 @@ int main(int argc, char **argv) {
 	double time_sec = 0.0;
 	int rc = 0;
 
+	// Execute corresponding GEMM kernel based on the loaded matrix precision
 	switch (input.precision) {
 		case 'S':
 			rc = run_sgemm_case(handle, &input, cli.op_a, cli.op_b, cli.warmup_runs, cli.iters, &time_sec);
@@ -724,6 +1031,7 @@ int main(int argc, char **argv) {
 	char final_op_a = cli.op_a;
 	char final_op_b = cli.op_b;
 
+	// HPC Rigor: Destroy the cuBLAS handle and free host-allocated matrix arrays
 	if (handle) {
 		cublasDestroy(handle);
 	}

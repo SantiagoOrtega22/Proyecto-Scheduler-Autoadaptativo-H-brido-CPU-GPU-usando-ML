@@ -1,5 +1,21 @@
-// fft_gpu.cu
-// Compilar desde la raiz del proyecto: nvcc -O3 -o algoritmos/fft_gpu algoritmos/fft_gpu.cu -lcufft
+/**
+ * @file fft_gpu.cu
+ * @brief Benchmark implementation for FFT (Fast Fourier Transform) on GPU.
+ *
+ * This file implements a robust GPU benchmarking suite for cuFFT.
+ * It supports 1D, 2D, and 3D transforms across different domains (C2C, R2C, C2R)
+ * and precisions (Single/Float and Double).
+ *
+ * The code adheres to stringent HPC measurement protocols:
+ *  - Warm-up loops to stabilize GPU clocks before measurement.
+ *  - Explicit synchronization mechanisms (cudaDeviceSynchronize, cudaEventSynchronize)
+ *    to isolate execution times and guarantee accurate host-side timing.
+ *  - Explicit resource deallocation (cudaFree, cufftDestroy) to prevent memory leaks (OOM)
+ *    during heavy benchmark sweeps.
+ *
+ * Compilation instructions:
+ *   nvcc -O3 -o algoritmos/fft_gpu algoritmos/fft_gpu.cu -lcufft
+ */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,10 +25,18 @@
 #include <cuda_runtime.h>
 #include <cufft.h>
 
+/**
+ * @brief Macro to check CUDA runtime API errors.
+ * Evaluates the call and exits if it fails to ensure reliable execution.
+ */
 #define CHECK_CUDA(call) \
     do { cudaError_t e = (call); if (e != cudaSuccess) { \
         fprintf(stderr, "CUDA error %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(e)); exit(1); } } while(0)
 
+/**
+ * @brief Macro to check cuFFT library API errors.
+ * Evaluates the call and exits if it fails.
+ */
 #define CHECK_CUFFT(call) \
     do { cufftResult r = (call); if (r != CUFFT_SUCCESS) { \
         fprintf(stderr, "cuFFT error %s:%d: %d\n", __FILE__, __LINE__, r); exit(1); } } while(0)
@@ -26,18 +50,24 @@ static size_t product_dims(int rank, const int dims[3]);
 static size_t r2c_complex_elems(int rank, const int dims[3]);
 static size_t r2c_real_inplace_elems(int rank, const int dims[3]);
 
+/**
+ * @struct FftConfig
+ * @brief Configuration parameters for a single FFT execution case.
+ * Holds all user-specified options including dimensions, batch size,
+ * domain, precision, and execution configuration.
+ */
 typedef struct FftConfig {
-    int nx;
-    int ny;
-    int nz;
-    int batch;
-    int warmup;
-    int iters;
-    char precision;
-    char domain[4];
-    char direction;
-    char layout;
-    char plan;
+    int nx;             /**< Size of the X dimension. */
+    int ny;             /**< Size of the Y dimension. */
+    int nz;             /**< Size of the Z dimension. */
+    int batch;          /**< Number of batched FFT operations. */
+    int warmup;         /**< Number of warm-up iterations. */
+    int iters;          /**< Number of measurement iterations. */
+    char precision;     /**< Precision: 'S' (Single/Float) or 'D' (Double). */
+    char domain[4];     /**< Domain transformation: "C2C", "R2C", or "C2R". */
+    char direction;     /**< Direction: 'F' (Forward) or 'I' (Inverse). */
+    char layout;        /**< Layout: 'I' (In-place) or 'O' (Out-of-place). */
+    char plan;          /**< Plan complexity indicator. */
 } FftConfig;  // Note: already declared as typedef struct FftConfig above
 
 static int g_fft_loaded_from_file = 0;
@@ -48,6 +78,10 @@ static double *g_fft_input_f64 = NULL;
 static cufftComplex *g_fft_input_c32 = NULL;
 static cufftDoubleComplex *g_fft_input_c64 = NULL;
 
+/**
+ * @brief Clears global FFT input buffers and state.
+ * Frees host memory allocated for file-based matrices to avoid memory leaks.
+ */
 static void clear_loaded_fft_inputs(void) {
     free(g_fft_input_f32);
     free(g_fft_input_f64);
@@ -62,6 +96,13 @@ static void clear_loaded_fft_inputs(void) {
     g_fft_file_domain[0] = '\0';
 }
 
+/**
+ * @brief Loads FFT matrix inputs and configuration from a binary file.
+ * 
+ * @param filename Path to the binary data file.
+ * @param cfg Pointer to configuration struct to be populated.
+ * @return int 0 on success, -1 on failure.
+ */
 static int load_fft_from_file(const char *filename, FftConfig *cfg) {
     FILE *f = fopen(filename, "rb");
     if (!f) {
@@ -155,6 +196,11 @@ static int load_fft_from_file(const char *filename, FftConfig *cfg) {
     fclose(f);
     return 0;
 }
+/**
+ * @brief Reads PRNG seed from environment variable.
+ * @param out_seed Pointer to store the extracted seed.
+ * @return int 1 if successfully read, 0 otherwise.
+ */
 static int seed_from_env(unsigned int *out_seed) {
     const char *env = getenv("BENCH_SEED");
     if (!env || !*env) {
@@ -169,12 +215,22 @@ static int seed_from_env(unsigned int *out_seed) {
     return 1;
 }
 
+/**
+ * @brief Converts a string to uppercase in place.
+ * @param s String to convert.
+ */
 static void upper_string(char *s) {
     for (; *s; ++s) {
         *s = (char)toupper((unsigned char)*s);
     }
 }
 
+/**
+ * @brief Determines the rank (1D, 2D, 3D) and configures the dimension array.
+ * @param cfg FFT configuration.
+ * @param dims Array of dimensions to be populated.
+ * @return int The rank of the transform (1, 2, or 3).
+ */
 static int setup_dims(const FftConfig *cfg, int dims[3]) {
     if (cfg->nz > 0) {
         dims[0] = cfg->nx;
@@ -191,6 +247,12 @@ static int setup_dims(const FftConfig *cfg, int dims[3]) {
     return 1;
 }
 
+/**
+ * @brief Computes the total number of real elements across all dimensions.
+ * @param rank Rank of the transform.
+ * @param dims Dimension array.
+ * @return size_t Product of the given dimensions.
+ */
 static size_t product_dims(int rank, const int dims[3]) {
     size_t total = 1;
     for (int i = 0; i < rank; ++i) {
@@ -199,6 +261,14 @@ static size_t product_dims(int rank, const int dims[3]) {
     return total;
 }
 
+/**
+ * @brief Computes the number of complex elements required for an R2C transform.
+ * R2C transforms output symmetric data, so only roughly half the elements + 1 
+ * are stored in the innermost dimension.
+ * @param rank Rank of the transform.
+ * @param dims Dimension array.
+ * @return size_t Total number of complex elements.
+ */
 static size_t r2c_complex_elems(int rank, const int dims[3]) {
     int last = dims[rank - 1];
     size_t outer = 1;
@@ -208,15 +278,23 @@ static size_t r2c_complex_elems(int rank, const int dims[3]) {
     return outer * (size_t)(last / 2 + 1);
 }
 
+/**
+ * @brief Computes the number of real elements required for an in-place R2C transform.
+ * In-place transforms require padding the real array to hold the larger complex output.
+ * @param rank Rank of the transform.
+ * @param dims Dimension array.
+ * @return size_t Total padded size in real elements.
+ */
 static size_t r2c_real_inplace_elems(int rank, const int dims[3]) {
-    int last = dims[rank - 1];
-    size_t outer = 1;
-    for (int i = 0; i < rank - 1; ++i) {
-        outer *= (size_t)dims[i];
-    }
-    return outer * (size_t)(last + 2);
+    return 2 * r2c_complex_elems(rank, dims);
 }
 
+/**
+ * @brief Computes the sum of log2 of dimensions, used for calculating GFLOPS.
+ * @param rank Rank of the transform.
+ * @param dims Dimension array.
+ * @return double Sum of log2 of dimensions.
+ */
 static double sum_log2_dims(int rank, const int dims[3]) {
     double sum = 0.0;
     for (int i = 0; i < rank; ++i) {
@@ -251,6 +329,13 @@ static void fill_complex_double(cufftDoubleComplex *buf, size_t count) {
     }
 }
 
+/**
+ * @brief Prints the performance statistics in a standardized format.
+ * Outputs parameters and timings so benchmark_runner can parse them.
+ * @param cfg FFT configuration used.
+ * @param time_sec Average time per iteration in seconds.
+ * @param gflops Calculated performance in GFLOPS.
+ */
 static void print_result(const FftConfig *cfg, double time_sec, double gflops) {
     double time_ms = time_sec * 1e3;
     printf(
@@ -270,6 +355,11 @@ static void print_result(const FftConfig *cfg, double time_sec, double gflops) {
     );
 }
 
+/**
+ * @brief Orchestrates Single-Precision Float FFT benchmarks (C2C, R2C, C2R).
+ * Configures plans, handles memory allocations, executes warmups, and measures performance.
+ * @param cfg Pointer to the execution configuration struct.
+ */
 static void benchmark_fft_float(const FftConfig *cfg) {
     int dims[3] = {0, 0, 0};
     int rank = setup_dims(cfg, dims);
@@ -307,7 +397,7 @@ static void benchmark_fft_float(const FftConfig *cfg) {
                 inembed[i] = dims[i];
                 onembed[i] = dims[i];
             }
-            inembed[rank - 1] = dims[rank - 1] + 2;
+            inembed[rank - 1] = 2 * (dims[rank - 1] / 2 + 1);
             onembed[rank - 1] = dims[rank - 1] / 2 + 1;
             inembed_ptr = inembed;
             onembed_ptr = onembed;
@@ -325,7 +415,7 @@ static void benchmark_fft_float(const FftConfig *cfg) {
                 onembed[i] = dims[i];
             }
             inembed[rank - 1] = dims[rank - 1] / 2 + 1;
-            onembed[rank - 1] = dims[rank - 1] + 2;
+            onembed[rank - 1] = 2 * (dims[rank - 1] / 2 + 1);
             inembed_ptr = inembed;
             onembed_ptr = onembed;
             idist = (int)ncomplex;
@@ -367,9 +457,11 @@ static void benchmark_fft_float(const FftConfig *cfg) {
 
         CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftComplex) * total_real, cudaMemcpyHostToDevice));
 
+        // HPC Rigor: Warm-up phase to stabilize GPU clock speeds
         for (int i = 0; i < warmup; ++i) {
             CHECK_CUFFT(cufftExecC2C(plan, d_in, d_out, dir));
         }
+        // HPC Rigor: Explicit synchronization before timing to isolate measurements
         CHECK_CUDA(cudaDeviceSynchronize());
 
         if (iters == 0) {
@@ -380,6 +472,7 @@ static void benchmark_fft_float(const FftConfig *cfg) {
                 CHECK_CUFFT(cufftExecC2C(plan, d_in, d_out, dir));
             }
             CHECK_CUDA(cudaEventRecord(stop));
+            // HPC Rigor: Sync using events to accurately capture asynchronous kernel completion
             CHECK_CUDA(cudaEventSynchronize(stop));
 
             float ms = 0.0f;
@@ -391,6 +484,7 @@ static void benchmark_fft_float(const FftConfig *cfg) {
             print_result(cfg, time_sec, gflops);
         }
 
+        // HPC Rigor: Free allocations to avoid GPU Out Of Memory (OOM) across sweeping parameters
         cufftDestroy(plan);
         cudaFree(d_in);
         if (cfg->layout != 'I') {
@@ -430,9 +524,11 @@ static void benchmark_fft_float(const FftConfig *cfg) {
 
         CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(float) * total_real, cudaMemcpyHostToDevice));
 
+        // HPC Rigor: Warm-up phase to stabilize GPU clock speeds
         for (int i = 0; i < warmup; ++i) {
             CHECK_CUFFT(cufftExecR2C(plan, d_in, d_out));
         }
+        // HPC Rigor: Explicit synchronization before timing to isolate measurements
         CHECK_CUDA(cudaDeviceSynchronize());
 
         if (iters == 0) {
@@ -443,6 +539,7 @@ static void benchmark_fft_float(const FftConfig *cfg) {
                 CHECK_CUFFT(cufftExecR2C(plan, d_in, d_out));
             }
             CHECK_CUDA(cudaEventRecord(stop));
+            // HPC Rigor: Sync using events to accurately capture asynchronous kernel completion
             CHECK_CUDA(cudaEventSynchronize(stop));
 
             float ms = 0.0f;
@@ -454,6 +551,7 @@ static void benchmark_fft_float(const FftConfig *cfg) {
             print_result(cfg, time_sec, gflops);
         }
 
+        // HPC Rigor: Free allocations to avoid GPU Out Of Memory (OOM) across sweeping parameters
         cufftDestroy(plan);
         cudaFree(d_in);
         if (cfg->layout != 'I') {
@@ -489,9 +587,11 @@ static void benchmark_fft_float(const FftConfig *cfg) {
 
         CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftComplex) * total_complex, cudaMemcpyHostToDevice));
 
+        // HPC Rigor: Warm-up phase to stabilize GPU clock speeds
         for (int i = 0; i < warmup; ++i) {
             CHECK_CUFFT(cufftExecC2R(plan, d_in, d_out));
         }
+        // HPC Rigor: Explicit synchronization before timing to isolate measurements
         CHECK_CUDA(cudaDeviceSynchronize());
 
         if (iters == 0) {
@@ -502,6 +602,7 @@ static void benchmark_fft_float(const FftConfig *cfg) {
                 CHECK_CUFFT(cufftExecC2R(plan, d_in, d_out));
             }
             CHECK_CUDA(cudaEventRecord(stop));
+            // HPC Rigor: Sync using events to accurately capture asynchronous kernel completion
             CHECK_CUDA(cudaEventSynchronize(stop));
 
             float ms = 0.0f;
@@ -513,6 +614,7 @@ static void benchmark_fft_float(const FftConfig *cfg) {
             print_result(cfg, time_sec, gflops);
         }
 
+        // HPC Rigor: Free allocations to avoid GPU Out Of Memory (OOM) across sweeping parameters
         cufftDestroy(plan);
         if (cfg->layout == 'I') {
             cudaFree(d_out);
@@ -527,6 +629,11 @@ static void benchmark_fft_float(const FftConfig *cfg) {
     }
 }
 
+/**
+ * @brief Orchestrates Double-Precision Float FFT benchmarks (Z2Z, D2Z, Z2D).
+ * Configures plans, handles memory allocations, executes warmups, and measures performance.
+ * @param cfg Pointer to the execution configuration struct.
+ */
 static void benchmark_fft_double(const FftConfig *cfg) {
     int dims[3] = {0, 0, 0};
     int rank = setup_dims(cfg, dims);
@@ -564,7 +671,7 @@ static void benchmark_fft_double(const FftConfig *cfg) {
                 inembed[i] = dims[i];
                 onembed[i] = dims[i];
             }
-            inembed[rank - 1] = dims[rank - 1] + 2;
+            inembed[rank - 1] = 2 * (dims[rank - 1] / 2 + 1);
             onembed[rank - 1] = dims[rank - 1] / 2 + 1;
             inembed_ptr = inembed;
             onembed_ptr = onembed;
@@ -582,7 +689,7 @@ static void benchmark_fft_double(const FftConfig *cfg) {
                 onembed[i] = dims[i];
             }
             inembed[rank - 1] = dims[rank - 1] / 2 + 1;
-            onembed[rank - 1] = dims[rank - 1] + 2;
+            onembed[rank - 1] = 2 * (dims[rank - 1] / 2 + 1);
             inembed_ptr = inembed;
             onembed_ptr = onembed;
             idist = (int)ncomplex;
@@ -624,9 +731,11 @@ static void benchmark_fft_double(const FftConfig *cfg) {
 
         CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftDoubleComplex) * total_real, cudaMemcpyHostToDevice));
 
+        // HPC Rigor: Warm-up phase to stabilize GPU clock speeds
         for (int i = 0; i < warmup; ++i) {
             CHECK_CUFFT(cufftExecZ2Z(plan, d_in, d_out, dir));
         }
+        // HPC Rigor: Explicit synchronization before timing to isolate measurements
         CHECK_CUDA(cudaDeviceSynchronize());
 
         if (iters == 0) {
@@ -637,6 +746,7 @@ static void benchmark_fft_double(const FftConfig *cfg) {
                 CHECK_CUFFT(cufftExecZ2Z(plan, d_in, d_out, dir));
             }
             CHECK_CUDA(cudaEventRecord(stop));
+            // HPC Rigor: Sync using events to accurately capture asynchronous kernel completion
             CHECK_CUDA(cudaEventSynchronize(stop));
 
             float ms = 0.0f;
@@ -648,6 +758,7 @@ static void benchmark_fft_double(const FftConfig *cfg) {
             print_result(cfg, time_sec, gflops);
         }
 
+        // HPC Rigor: Free allocations to avoid GPU Out Of Memory (OOM) across sweeping parameters
         cufftDestroy(plan);
         cudaFree(d_in);
         if (cfg->layout != 'I') {
@@ -687,9 +798,11 @@ static void benchmark_fft_double(const FftConfig *cfg) {
 
         CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(double) * total_real, cudaMemcpyHostToDevice));
 
+        // HPC Rigor: Warm-up phase to stabilize GPU clock speeds
         for (int i = 0; i < warmup; ++i) {
             CHECK_CUFFT(cufftExecD2Z(plan, d_in, d_out));
         }
+        // HPC Rigor: Explicit synchronization before timing to isolate measurements
         CHECK_CUDA(cudaDeviceSynchronize());
 
         if (iters == 0) {
@@ -700,6 +813,7 @@ static void benchmark_fft_double(const FftConfig *cfg) {
                 CHECK_CUFFT(cufftExecD2Z(plan, d_in, d_out));
             }
             CHECK_CUDA(cudaEventRecord(stop));
+            // HPC Rigor: Sync using events to accurately capture asynchronous kernel completion
             CHECK_CUDA(cudaEventSynchronize(stop));
 
             float ms = 0.0f;
@@ -711,6 +825,7 @@ static void benchmark_fft_double(const FftConfig *cfg) {
             print_result(cfg, time_sec, gflops);
         }
 
+        // HPC Rigor: Free allocations to avoid GPU Out Of Memory (OOM) across sweeping parameters
         cufftDestroy(plan);
         cudaFree(d_in);
         if (cfg->layout != 'I') {
@@ -746,9 +861,11 @@ static void benchmark_fft_double(const FftConfig *cfg) {
 
         CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftDoubleComplex) * total_complex, cudaMemcpyHostToDevice));
 
+        // HPC Rigor: Warm-up phase to stabilize GPU clock speeds
         for (int i = 0; i < warmup; ++i) {
             CHECK_CUFFT(cufftExecZ2D(plan, d_in, d_out));
         }
+        // HPC Rigor: Explicit synchronization before timing to isolate measurements
         CHECK_CUDA(cudaDeviceSynchronize());
 
         if (iters == 0) {
@@ -759,6 +876,7 @@ static void benchmark_fft_double(const FftConfig *cfg) {
                 CHECK_CUFFT(cufftExecZ2D(plan, d_in, d_out));
             }
             CHECK_CUDA(cudaEventRecord(stop));
+            // HPC Rigor: Sync using events to accurately capture asynchronous kernel completion
             CHECK_CUDA(cudaEventSynchronize(stop));
 
             float ms = 0.0f;
@@ -770,6 +888,7 @@ static void benchmark_fft_double(const FftConfig *cfg) {
             print_result(cfg, time_sec, gflops);
         }
 
+        // HPC Rigor: Free allocations to avoid GPU Out Of Memory (OOM) across sweeping parameters
         cufftDestroy(plan);
         if (cfg->layout == 'I') {
             cudaFree(d_out);
@@ -784,6 +903,14 @@ static void benchmark_fft_double(const FftConfig *cfg) {
     }
 }
 
+/**
+ * @brief Parses CLI arguments into an FftConfig structure.
+ * Supports legacy single-N inputs as well as full dimensionality and configuration flags.
+ * @param argc Argument count.
+ * @param argv Argument string array.
+ * @param cfg Output configuration object.
+ * @return int 0 on success, -1 on parsing error.
+ */
 static int parse_config(int argc, char **argv, FftConfig *cfg) {
     cfg->nx = 4096;
     cfg->ny = 0;
@@ -842,6 +969,10 @@ static int parse_config(int argc, char **argv, FftConfig *cfg) {
     return 0;
 }
 
+/**
+ * @brief Prints usage guidelines to standard output.
+ * @param prog Program execution name.
+ */
 static void print_usage(const char *prog) {
     printf("Uso:\n");
     printf("  %s N\n", prog);
@@ -850,6 +981,13 @@ static void print_usage(const char *prog) {
     printf("  %s 1024 0 0 4 S C2C F I 3 10 E\n", prog);
 }
 
+/**
+ * @brief Main entry point for the GPU FFT Benchmark.
+ * Coordinates parsing, parameter sanitization, and execution of the requested kernel.
+ * @param argc Argument count.
+ * @param argv Argument string array.
+ * @return int 0 on success, 1 on failure.
+ */
 int main(int argc, char **argv) {
     FftConfig cfg;
     if (parse_config(argc, argv, &cfg) != 0) {

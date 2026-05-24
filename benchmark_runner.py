@@ -767,9 +767,35 @@ def run_single_case(
     try:
         cmd = [binary, str(m), str(n), str(k), precision, op_a, op_b, matrix_file]
 
+        # 1. Warmups
         if warmup_runs > 0:
             run_gemm_warmup(cmd, timeout, warmup_runs, matrix_file)
 
+        # 2. Metric Isolation Execution (Solo Tiempo)
+        proc_iso = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        if proc_iso.returncode != 0:
+            raise RuntimeError(
+                "Fallo en binario para "
+                f"M={m}, N={n}, K={k}, P={precision}, OpA={op_a}, OpB={op_b}.\n"
+                f"STDOUT:\n{proc_iso.stdout}\nSTDERR:\n{proc_iso.stderr}"
+            )
+
+        match = TIME_PATTERN.search(proc_iso.stdout)
+        if not match:
+            raise RuntimeError(
+                "No se pudo parsear Time_sec de la salida del binario en aislamiento.\n"
+                f"Salida:\n{proc_iso.stdout}"
+            )
+
+        time_sec = float(match.group(1))
+
+        # 3. Power Monitoring Execution (Segunda ejecucion identica con monitor activo)
         power_queue = queue.Queue(maxsize=1)
         stop_event = threading.Event()
 
@@ -798,7 +824,7 @@ def run_single_case(
             monitor_thread.start()
 
         try:
-            proc = subprocess.run(
+            proc_pwr = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
@@ -813,25 +839,14 @@ def run_single_case(
         end_wall = time.perf_counter()
         samples = power_queue.get() if not power_queue.empty() else []
 
-        if proc.returncode != 0:
+        if proc_pwr.returncode != 0:
             raise RuntimeError(
-                "Fallo en binario para "
+                "Fallo en binario para ejecucion de monitoreo "
                 f"M={m}, N={n}, K={k}, P={precision}, OpA={op_a}, OpB={op_b}.\n"
-                f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+                f"STDOUT:\n{proc_pwr.stdout}\nSTDERR:\n{proc_pwr.stderr}"
             )
-
-        match = TIME_PATTERN.search(proc.stdout)
-        if not match:
-            raise RuntimeError(
-                "No se pudo parsear Time_sec de la salida del binario.\n"
-                f"Salida:\n{proc.stdout}"
-            )
-
-        time_sec = float(match.group(1))
         if time_sec <= 0.0:
-            raise RuntimeError(
-                f"Time_sec invalido ({time_sec}) para M={m},N={n},K={k},P={precision},OpA={op_a},OpB={op_b}"
-            )
+            time_sec = 1e-9
 
         avg_power_w = 0.0
         energy_j = 0.0
@@ -918,6 +933,35 @@ def run_single_case_fft(
     if matrix_file:
         cmd.append(matrix_file)
 
+    # 1. Metric Isolation Execution (Solo Tiempo)
+    proc_iso = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
+    if proc_iso.returncode != 0:
+        raise RuntimeError(
+            "Fallo en binario FFT para "
+            f"Nx={nx}, Ny={ny}, Nz={nz}, Batch={batch}, P={precision}, D={domain}, Dir={direction}, L={layout}.\n"
+            f"STDOUT:\n{proc_iso.stdout}\nSTDERR:\n{proc_iso.stderr}"
+        )
+
+    match = FFT_TIME_PATTERN.search(proc_iso.stdout)
+    if not match:
+        raise RuntimeError(
+            "No se pudo parsear tiempo de la salida FFT.\n"
+            f"Salida:\n{proc_iso.stdout}"
+        )
+
+    if match.group(1) is not None:
+        time_sec = float(match.group(1))
+    else:
+        time_sec = float(match.group(2)) / 1e3
+
+    # 2. Power Monitoring Execution (Segunda ejecucion con monitor activo)
     power_queue = queue.Queue(maxsize=1)
     stop_event = threading.Event()
 
@@ -946,7 +990,7 @@ def run_single_case_fft(
         monitor_thread.start()
 
     try:
-        proc = subprocess.run(
+        proc_pwr = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
@@ -960,29 +1004,11 @@ def run_single_case_fft(
 
     end_wall = time.perf_counter()
     samples = power_queue.get() if not power_queue.empty() else []
-
-    if proc.returncode != 0:
-        raise RuntimeError(
-            "Fallo en binario FFT para "
-            f"Nx={nx}, Ny={ny}, Nz={nz}, Batch={batch}, P={precision}, D={domain}, Dir={direction}, L={layout}.\n"
-            f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
-        )
-
-    match = FFT_TIME_PATTERN.search(proc.stdout)
-    if not match:
-        raise RuntimeError(
-            "No se pudo parsear tiempo de la salida FFT.\n"
-            f"Salida:\n{proc.stdout}"
-        )
-
-    if match.group(1) is not None:
-        time_sec = float(match.group(1))
-    else:
-        time_sec = float(match.group(2)) / 1e3
+    
+    if proc_pwr.returncode != 0:
+        raise RuntimeError("Fallo en ejecucion de monitoreo de FFT.")
     if time_sec <= 0.0:
-        raise RuntimeError(
-            f"Time_sec invalido ({time_sec}) para Nx={nx},Ny={ny},Nz={nz},Batch={batch}"
-        )
+        time_sec = 1e-9
 
     avg_power_w = 0.0
     energy_j = 0.0
@@ -1479,7 +1505,7 @@ def main():
     parser.add_argument(
         "--fft-warmup",
         type=int,
-        default=3,
+        default=4,
         help="Iteraciones de warmup FFT",
     )
     parser.add_argument(

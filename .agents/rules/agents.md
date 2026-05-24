@@ -1,3 +1,8 @@
+---
+trigger: always_on
+---
+
+# Copilot Cloud Agent Onboarding Instructions
 # Software Design Description: Benchmark for Reinforcement Learning Data Collection
 
 ---
@@ -64,3 +69,47 @@ The system consists of a data bank containing the matrices/arrays for each size 
 ## Section 6 - Non-Functional Requirements
 
 * **Reliability**: All measurements taken must be reliable and free from measurement risks or errors.
+
+Para complementar tu **SDD** y asegurar que Copilot genere código de alta calidad científica y técnica, es fundamental incluir una sección de **"Development Standards & Documentation Rules"**.
+
+Como tu asesor **Copia TG**, he redactado esta especificación técnica. Puedes pegarla directamente en tu archivo `.github/copilot-instructions.md` o al final de tu SDD en inglés.
+
+---
+
+### Section 7 - Coding Standards and Documentation
+
+#### 7.1 Code Quality (Clean Code)
+
+* **Modularity**: Code must follow the **Single Responsibility Principle (SRP)**. Telemetry (RAPL/NVML), execution orchestration, and data exporting must be in separate classes or modules.
+* **Naming Conventions**:
+* Variables and functions must use `snake_case`.
+* Classes must use `PascalCase`.
+* Constants must use `UPPER_SNAKE_CASE`.
+* Names must be descriptive (e.g., `measure_gpu_power()` instead of `get_pwr()`).
+
+
+* **Error Handling**: Use explicit `try-except` blocks for hardware-related calls (NVML initialization, RAPL file access). Errors must be logged, and the benchmark should skip the current iteration safely if a measurement fails.
+* **Type Hinting**: All Python functions must include type hints (e.g., `def run_warmup(n_size: int) -> None:`).
+
+#### 7.2 HPC Rigor (Performance Specifics)
+
+* **Resource Management**: Always use Context Managers (`with` statements) for file operations and database connections.
+* **Explicit Synchronization**: GPU tasks must be preceded and followed by `cudaDeviceSynchronize()` to ensure the host timer accurately reflects kernel completion.
+* **Memory Management**: Explicitly clear or free large matrices/arrays between runs to prevent memory leaks and "Out of Memory" (OOM) errors during long sweeps.
+
+#### 7.3 Documentation Standards
+
+* **Docstrings**: All classes and methods must include **Google-style** or **NumPy-style** docstrings explaining:
+* Purpose of the function.
+* Arguments (type and description).
+* Return values (type and description).
+* Raised exceptions.
+
+
+* **Inline Comments**: Use comments to explain *why* a specific HPC protocol is being followed (e.g., `# Strict isolation: power tool disabled to measure peak GFLOPS`).
+* **README**: The project root must contain a `README.md` with:
+* Hardware requirements (NVIDIA GPU, Intel RAPL support).
+* Software dependencies (`requirements.txt`).
+* Step-by-step execution guide.
+
+
