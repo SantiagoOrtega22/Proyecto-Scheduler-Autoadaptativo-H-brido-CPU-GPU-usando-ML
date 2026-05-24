@@ -1,705 +1,745 @@
-#include <cuda_fp16.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+#include <ctype.h>
+#include <time.h>
+
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <cuComplex.h>
 
-#include <algorithm>
-#include <cctype>
-#include <cstdlib>
-#include <cstdio>
-#include <iomanip>
-#include <iostream>
-#include <string>
-#include <vector>
+#define CHECK_CUDA(call)                                                             \
+	do {                                                                             \
+		cudaError_t cuda_error = (call);                                             \
+		if (cuda_error != cudaSuccess) {                                             \
+			fprintf(stderr, "CUDA error %s:%d: %s\n", __FILE__, __LINE__,           \
+					cudaGetErrorString(cuda_error));                                  \
+			return 1;                                                                \
+		}                                                                            \
+	} while (0)
 
-/*
- ============================================================================
-                        GUIA DE COMPILACION Y EJECUCION
- ============================================================================
+#define CHECK_CUBLAS(call)                                                           \
+	do {                                                                             \
+		cublasStatus_t cublas_status = (call);                                       \
+		if (cublas_status != CUBLAS_STATUS_SUCCESS) {                                \
+			fprintf(stderr, "cuBLAS error %s:%d: %d\n", __FILE__, __LINE__,         \
+					(int)cublas_status);                                              \
+			return 1;                                                                \
+		}                                                                            \
+	} while (0)
 
- 1. COMPILACION:
-    Desde la raiz del proyecto, ejecutar:
-    $ nvcc -O3 -o algoritmos/gemm_gpu algoritmos/gemm_gpu.cu -lcublas
+#define GEMM_WARMUP_RUNS 4
+#define GEMM_MEASURE_ITERS 1
 
- 2. EJECUCION - CASO INDIVIDUAL:
-    Sintaxis: ./algoritmos/gemm_gpu M N K Precision [OpA] [OpB] [matrix_file]
-    
-    Parametros:
-      M, N, K      : Dimensiones de la matriz (numeros positivos)
-      Precision     : S (float), D (double), C (complex), Z (complex double)
-      OpA, OpB      : [Opcional] Operaciones sobre A,B:
-                      N = No-op (sin transformacion, usa matriz tal cual)
-                      T = Transpose (transpone la matriz)
-                      C = Conjugate (para complejos: invierte signo parte imaginaria)
-                      Si se omiten, usa N,N por defecto
-      matrix_file   : [Opcional] Archivo binario con las matrices de entrada generadas por el benchmark_runner
+typedef struct {
+	int m;
+	int n;
+	int k;
+	char precision;
+	char op_a;
+	char op_b;
+	const char *source_path;
+	int warmup_runs;
+	int iters;
+} GemmCli;
 
-    Operadores (afectan calculo: C = alpha*OpA(A)*OpB(B) + beta*C):
-      - N,N: A(MxK) y B(KxN) sin cambios
-      - T,N: A transpuesta (KxM) y B sin cambios (KxN)
-      - N,T: A sin cambios (MxK) y B transpuesta (NxK)
-      - T,T: Ambas transpuestas A(KxM) y B(NxK)
-      - C,C: Ambas conjugadas (util para datos complejos)
+typedef struct {
+	int m;
+	int n;
+	int k;
+	char precision;
+	void *a;
+	void *b;
+	void *c;
+} GemmInput;
 
-    Ejemplos:
-      # Sin transposicion (N,N) - caso base
-      $ ./algoritmos/gemm_gpu 256 256 256 D
-      Salida: M=256 N=256 K=256 Precision=D OpA=N OpB=N Time_sec=X.XXXXX
-
-      # Single precision, transpuesta en A solamente
-      $ ./algoritmos/gemm_gpu 512 512 512 S T N
-      Salida: M=512 N=512 K=512 Precision=S OpA=T OpB=N Time_sec=X.XXXXX
-
-      # Complex double, transposicion en ambas
-      $ ./algoritmos/gemm_gpu 1024 1024 1024 Z T T
-      Salida: M=1024 N=1024 K=1024 Precision=Z OpA=T OpB=T Time_sec=X.XXXXX
-
-      # Complex precision, conjugadas en ambas
-      $ ./algoritmos/gemm_gpu 512 512 512 C C C
-      Salida: M=512 N=512 K=512 Precision=C OpA=C OpB=C Time_sec=X.XXXXX
-
- 3. BARRIDO BASELINE (via orchestrador Python):
-    Ejecutar todas las combinaciones de tamanos (128-4096) x precisiones (S,D,C,Z)
-    con operaciones fijas a N,N (sin transposicion):
-    $ python3 benchmark_runner.py
-    Genera: benchmark_results.csv con ~96 filas (6 tamanos × 4 precisiones × 4 tamanos)
-
- 4. BARRIDO COMPLETO CON TRANSPOSICIONES:
-    Incluir todas las combinaciones de operaciones (N,T,C):
-    $ python3 benchmark_runner.py --sweep-transpose --op-a-list N,T --op-b-list N,T
-    Genera: benchmark_results_transpose_full.csv con ~384 filas
-    (6 tamanos × 4 precisiones × 4 combinaciones OpA,OpB)
-
- 5. SALIDA CSV:
-    Columnas: M, N, K, Precision, OpA, OpB, Time_sec, GFLOPS, Avg_Power_W, Energy_J, EDP
-    - Time_sec: Tiempo de ejecucion GEMM (milisegundos)
-    - GFLOPS: Rendimiento (operaciones en punto flotante por segundo / 1e9)
-    - Avg_Power_W: Potencia GPU promedio (W)
-    - Energy_J: Energia = Potencia × Tiempo (Joules)
-    - EDP: Energy-Delay Product = Energy × Time (Joules × segundos)
-
- ============================================================================
-*/
-
-// Compilar desde la raiz del proyecto:
-// nvcc gemm_gpu.cu -O3 -lcublas -o gemm_gpu
-
-#define CHECK_CUDA(call)                                                         \
-    do {                                                                         \
-        cudaError_t err = (call);                                                \
-        if (err != cudaSuccess) {                                                \
-            std::cerr << "CUDA error: " << cudaGetErrorString(err)              \
-                      << " (" << __FILE__ << ":" << __LINE__ << ")"           \
-                      << std::endl;                                              \
-            std::exit(EXIT_FAILURE);                                             \
-        }                                                                        \
-    } while (0)
-
-#define CHECK_CUBLAS(call)                                                       \
-    do {                                                                         \
-        cublasStatus_t st = (call);                                              \
-        if (st != CUBLAS_STATUS_SUCCESS) {                                       \
-            std::cerr << "cuBLAS error code " << st                             \
-                      << " (" << __FILE__ << ":" << __LINE__ << ")"           \
-                      << std::endl;                                              \
-            std::exit(EXIT_FAILURE);                                             \
-        }                                                                        \
-    } while (0)
-
-static bool g_use_random = false;
-static bool g_loaded_from_file = false;
-static std::vector<float> g_file_a_f32;
-static std::vector<float> g_file_b_f32;
-static std::vector<float> g_file_c_f32;
-static std::vector<double> g_file_a_f64;
-static std::vector<double> g_file_b_f64;
-static std::vector<double> g_file_c_f64;
-static std::vector<cuComplex> g_file_a_c32;
-static std::vector<cuComplex> g_file_b_c32;
-static std::vector<cuComplex> g_file_c_c32;
-static std::vector<cuDoubleComplex> g_file_a_c64;
-static std::vector<cuDoubleComplex> g_file_b_c64;
-static std::vector<cuDoubleComplex> g_file_c_c64;
-
-static void init_seed_from_env() {
-    const char *env = std::getenv("BENCH_SEED");
-    if (!env || !*env) {
-        return;
-    }
-    char *end = nullptr;
-    unsigned long val = std::strtoul(env, &end, 10);
-    if (end == env) {
-        return;
-    }
-    std::srand(static_cast<unsigned int>(val));
-    g_use_random = true;
+static double monotonic_time_sec(void) {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
-static int load_gemm_matrices_from_file(const char *filename, int *M, int *N, int *K, char *precision) {
-    FILE *f = fopen(filename, "rb");
-    if (!f) {
-        std::perror("fopen");
-        return -1;
-    }
-
-    int m = 0, n = 0, k = 0;
-    char p = '\0';
-    if (fread(&m, sizeof(int), 1, f) != 1 ||
-        fread(&n, sizeof(int), 1, f) != 1 ||
-        fread(&k, sizeof(int), 1, f) != 1 ||
-        fread(&p, sizeof(char), 1, f) != 1) {
-        fclose(f);
-        return -1;
-    }
-
-    g_loaded_from_file = true;
-    g_use_random = false;
-    g_file_a_f32.clear(); g_file_b_f32.clear(); g_file_c_f32.clear();
-    g_file_a_f64.clear(); g_file_b_f64.clear(); g_file_c_f64.clear();
-    g_file_a_c32.clear(); g_file_b_c32.clear(); g_file_c_c32.clear();
-    g_file_a_c64.clear(); g_file_b_c64.clear(); g_file_c_c64.clear();
-
-    size_t size_a = static_cast<size_t>(m) * static_cast<size_t>(k);
-    size_t size_b = static_cast<size_t>(k) * static_cast<size_t>(n);
-    size_t size_c = static_cast<size_t>(m) * static_cast<size_t>(n);
-
-    switch (p) {
-        case 'S': {
-            g_file_a_f32.resize(size_a);
-            g_file_b_f32.resize(size_b);
-            g_file_c_f32.resize(size_c);
-            if (fread(g_file_a_f32.data(), sizeof(float), size_a, f) != size_a ||
-                fread(g_file_b_f32.data(), sizeof(float), size_b, f) != size_b ||
-                fread(g_file_c_f32.data(), sizeof(float), size_c, f) != size_c) {
-                fclose(f);
-                return -1;
-            }
-            break;
-        }
-        case 'D': {
-            g_file_a_f64.resize(size_a);
-            g_file_b_f64.resize(size_b);
-            g_file_c_f64.resize(size_c);
-            if (fread(g_file_a_f64.data(), sizeof(double), size_a, f) != size_a ||
-                fread(g_file_b_f64.data(), sizeof(double), size_b, f) != size_b ||
-                fread(g_file_c_f64.data(), sizeof(double), size_c, f) != size_c) {
-                fclose(f);
-                return -1;
-            }
-            break;
-        }
-        case 'C': {
-            g_file_a_c32.resize(size_a);
-            g_file_b_c32.resize(size_b);
-            g_file_c_c32.resize(size_c);
-            for (size_t i = 0; i < size_a; ++i) {
-                float re = 0.0f, im = 0.0f;
-                if (fread(&re, sizeof(float), 1, f) != 1 || fread(&im, sizeof(float), 1, f) != 1) {
-                    fclose(f);
-                    return -1;
-                }
-                g_file_a_c32[i] = make_cuComplex(re, im);
-            }
-            for (size_t i = 0; i < size_b; ++i) {
-                float re = 0.0f, im = 0.0f;
-                if (fread(&re, sizeof(float), 1, f) != 1 || fread(&im, sizeof(float), 1, f) != 1) {
-                    fclose(f);
-                    return -1;
-                }
-                g_file_b_c32[i] = make_cuComplex(re, im);
-            }
-            for (size_t i = 0; i < size_c; ++i) {
-                float re = 0.0f, im = 0.0f;
-                if (fread(&re, sizeof(float), 1, f) != 1 || fread(&im, sizeof(float), 1, f) != 1) {
-                    fclose(f);
-                    return -1;
-                }
-                g_file_c_c32[i] = make_cuComplex(re, im);
-            }
-            break;
-        }
-        case 'Z': {
-            g_file_a_c64.resize(size_a);
-            g_file_b_c64.resize(size_b);
-            g_file_c_c64.resize(size_c);
-            for (size_t i = 0; i < size_a; ++i) {
-                double re = 0.0, im = 0.0;
-                if (fread(&re, sizeof(double), 1, f) != 1 || fread(&im, sizeof(double), 1, f) != 1) {
-                    fclose(f);
-                    return -1;
-                }
-                g_file_a_c64[i] = make_cuDoubleComplex(re, im);
-            }
-            for (size_t i = 0; i < size_b; ++i) {
-                double re = 0.0, im = 0.0;
-                if (fread(&re, sizeof(double), 1, f) != 1 || fread(&im, sizeof(double), 1, f) != 1) {
-                    fclose(f);
-                    return -1;
-                }
-                g_file_b_c64[i] = make_cuDoubleComplex(re, im);
-            }
-            for (size_t i = 0; i < size_c; ++i) {
-                double re = 0.0, im = 0.0;
-                if (fread(&re, sizeof(double), 1, f) != 1 || fread(&im, sizeof(double), 1, f) != 1) {
-                    fclose(f);
-                    return -1;
-                }
-                g_file_c_c64[i] = make_cuDoubleComplex(re, im);
-            }
-            break;
-        }
-        default:
-            fclose(f);
-            return -1;
-    }
-
-    fclose(f);
-    *M = m;
-    *N = n;
-    *K = k;
-    *precision = p;
-    return 0;
+static char normalize_precision(char precision) {
+	precision = (char)toupper((unsigned char)precision);
+	if (precision != 'S' && precision != 'D' && precision != 'C' && precision != 'Z') {
+		return '\0';
+	}
+	return precision;
 }
 
-static void fill_real(std::vector<double> &buf) {
-    if (g_loaded_from_file && !g_file_a_f64.empty() && buf.size() == g_file_a_f64.size()) {
-        if (&buf == nullptr) {
-            return;
-        }
-        std::copy(g_file_a_f64.begin(), g_file_a_f64.end(), buf.begin());
-        return;
-    }
-    if (g_use_random) {
-        for (double &v : buf) {
-            v = static_cast<double>(std::rand()) / RAND_MAX;
-        }
-        return;
-    }
-    std::fill(buf.begin(), buf.end(), 1.0);
+static char normalize_op(char op) {
+	op = (char)toupper((unsigned char)op);
+	if (op != 'N' && op != 'T' && op != 'C') {
+		return '\0';
+	}
+	return op;
 }
 
-static void fill_real(std::vector<float> &buf) {
-    if (g_loaded_from_file && !g_file_a_f32.empty() && buf.size() == g_file_a_f32.size()) {
-        if (&buf == nullptr) {
-            return;
-        }
-        std::copy(g_file_a_f32.begin(), g_file_a_f32.end(), buf.begin());
-        return;
-    }
-    if (g_use_random) {
-        for (float &v : buf) {
-            v = static_cast<float>(std::rand()) / RAND_MAX;
-        }
-        return;
-    }
-    std::fill(buf.begin(), buf.end(), 1.0f);
+static cublasOperation_t to_cublas_op(char op, char precision) {
+	op = normalize_op(op);
+	if (op == '\0') {
+		return CUBLAS_OP_N;
+	}
+	if (op == 'C' && precision != 'C' && precision != 'Z') {
+		return CUBLAS_OP_T;
+	}
+	if (op == 'N') {
+		return CUBLAS_OP_N;
+	}
+	if (op == 'T') {
+		return CUBLAS_OP_T;
+	}
+	return CUBLAS_OP_C;
 }
 
-static void fill_complex(std::vector<cuComplex> &buf) {
-    if (g_loaded_from_file && !g_file_a_c32.empty() && buf.size() == g_file_a_c32.size()) {
-        if (&buf == nullptr) {
-            return;
-        }
-        std::copy(g_file_a_c32.begin(), g_file_a_c32.end(), buf.begin());
-        return;
-    }
-    if (g_use_random) {
-        for (cuComplex &v : buf) {
-            float re = static_cast<float>(std::rand()) / RAND_MAX;
-            float im = static_cast<float>(std::rand()) / RAND_MAX;
-            v = make_cuComplex(re, im);
-        }
-        return;
-    }
-    std::fill(buf.begin(), buf.end(), make_cuComplex(1.0f, 0.0f));
+static void free_gemm_input(GemmInput *input) {
+	if (!input) {
+		return;
+	}
+	free(input->a);
+	free(input->b);
+	free(input->c);
+	input->a = NULL;
+	input->b = NULL;
+	input->c = NULL;
 }
 
-static void fill_complex(std::vector<cuDoubleComplex> &buf) {
-    if (g_loaded_from_file && !g_file_a_c64.empty() && buf.size() == g_file_a_c64.size()) {
-        if (&buf == nullptr) {
-            return;
-        }
-        std::copy(g_file_a_c64.begin(), g_file_a_c64.end(), buf.begin());
-        return;
-    }
-    if (g_use_random) {
-        for (cuDoubleComplex &v : buf) {
-            double re = static_cast<double>(std::rand()) / RAND_MAX;
-            double im = static_cast<double>(std::rand()) / RAND_MAX;
-            v = make_cuDoubleComplex(re, im);
-        }
-        return;
-    }
-    std::fill(buf.begin(), buf.end(), make_cuDoubleComplex(1.0, 0.0));
+static int read_exact(FILE *file, void *ptr, size_t size, size_t count) {
+	return fread(ptr, size, count, file) == count ? 0 : -1;
 }
 
-double benchmark_dgemm(cublasHandle_t handle, int M, int N, int K,
-                       cublasOperation_t opA, cublasOperation_t opB) {
-    size_t size_a = static_cast<size_t>(M) * K;
-    size_t size_b = static_cast<size_t>(K) * N;
-    size_t size_c = static_cast<size_t>(M) * N;
-    int lda = (opA == CUBLAS_OP_N) ? M : K;
-    int ldb = (opB == CUBLAS_OP_N) ? K : N;
-    int ldc = M;
+static int load_gemm_input_from_file(const char *path, GemmInput *input) {
+	FILE *file = fopen(path, "rb");
+	if (!file) {
+		perror("No se pudo abrir el archivo de matrices");
+		return -1;
+	}
 
-    std::vector<double> h_a(size_a);
-    std::vector<double> h_b(size_b);
-    std::vector<double> h_c(size_c, 0.0);
+	int m = 0;
+	int n = 0;
+	int k = 0;
+	char precision = '\0';
 
-    if (g_loaded_from_file && !g_file_a_f64.empty()) {
-        std::copy(g_file_a_f64.begin(), g_file_a_f64.end(), h_a.begin());
-        std::copy(g_file_b_f64.begin(), g_file_b_f64.end(), h_b.begin());
-    } else {
-        fill_real(h_a);
-        fill_real(h_b);
-    }
+	if (read_exact(file, &m, sizeof(int), 1) != 0 ||
+		read_exact(file, &n, sizeof(int), 1) != 0 ||
+		read_exact(file, &k, sizeof(int), 1) != 0 ||
+		read_exact(file, &precision, sizeof(char), 1) != 0) {
+		fclose(file);
+		fprintf(stderr, "Error al leer el encabezado del archivo de matrices\n");
+		return -1;
+	}
 
-    double* d_a = nullptr;
-    double* d_b = nullptr;
-    double* d_c = nullptr;
+	precision = normalize_precision(precision);
+	if (precision == '\0') {
+		fclose(file);
+		fprintf(stderr, "Precision invalida en el archivo de matrices\n");
+		return -1;
+	}
 
-    CHECK_CUDA(cudaMalloc(&d_a, size_a * sizeof(double)));
-    CHECK_CUDA(cudaMalloc(&d_b, size_b * sizeof(double)));
-    CHECK_CUDA(cudaMalloc(&d_c, size_c * sizeof(double)));
+	size_t a_count = (size_t)m * (size_t)k;
+	size_t b_count = (size_t)k * (size_t)n;
+	size_t c_count = (size_t)m * (size_t)n;
 
-    CHECK_CUDA(cudaMemcpy(d_a, h_a.data(), size_a * sizeof(double), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(d_b, h_b.data(), size_b * sizeof(double), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(d_c, h_c.data(), size_c * sizeof(double), cudaMemcpyHostToDevice));
+	input->m = m;
+	input->n = n;
+	input->k = k;
+	input->precision = precision;
+	input->a = NULL;
+	input->b = NULL;
+	input->c = NULL;
 
-    const double alpha = 1.0;
-    const double beta = 0.0;
+	if (precision == 'S') {
+		input->a = malloc(a_count * sizeof(float));
+		input->b = malloc(b_count * sizeof(float));
+		input->c = malloc(c_count * sizeof(float));
+		if (!input->a || !input->b || !input->c) {
+			fclose(file);
+			free_gemm_input(input);
+			return -1;
+		}
+		if (read_exact(file, input->a, sizeof(float), a_count) != 0 ||
+			read_exact(file, input->b, sizeof(float), b_count) != 0 ||
+			read_exact(file, input->c, sizeof(float), c_count) != 0) {
+			fclose(file);
+			free_gemm_input(input);
+			fprintf(stderr, "Error al leer datos float del archivo de matrices\n");
+			return -1;
+		}
+	} else if (precision == 'D') {
+		input->a = malloc(a_count * sizeof(double));
+		input->b = malloc(b_count * sizeof(double));
+		input->c = malloc(c_count * sizeof(double));
+		if (!input->a || !input->b || !input->c) {
+			fclose(file);
+			free_gemm_input(input);
+			return -1;
+		}
+		if (read_exact(file, input->a, sizeof(double), a_count) != 0 ||
+			read_exact(file, input->b, sizeof(double), b_count) != 0 ||
+			read_exact(file, input->c, sizeof(double), c_count) != 0) {
+			fclose(file);
+			free_gemm_input(input);
+			fprintf(stderr, "Error al leer datos double del archivo de matrices\n");
+			return -1;
+		}
+	} else if (precision == 'C') {
+		input->a = malloc(a_count * sizeof(cuComplex));
+		input->b = malloc(b_count * sizeof(cuComplex));
+		input->c = malloc(c_count * sizeof(cuComplex));
+		if (!input->a || !input->b || !input->c) {
+			fclose(file);
+			free_gemm_input(input);
+			return -1;
+		}
 
-    CHECK_CUBLAS(cublasDgemm(handle, opA, opB, M, N, K,
-                             &alpha, d_a, lda, d_b, ldb, &beta, d_c, ldc));
-    CHECK_CUDA(cudaDeviceSynchronize());
+		cuComplex *a = (cuComplex *)input->a;
+		cuComplex *b = (cuComplex *)input->b;
+		cuComplex *c = (cuComplex *)input->c;
+		for (size_t i = 0; i < a_count; ++i) {
+			if (read_exact(file, &a[i].x, sizeof(float), 1) != 0 ||
+				read_exact(file, &a[i].y, sizeof(float), 1) != 0) {
+				fclose(file);
+				free_gemm_input(input);
+				fprintf(stderr, "Error al leer datos complejos simples de A\n");
+				return -1;
+			}
+		}
+		for (size_t i = 0; i < b_count; ++i) {
+			if (read_exact(file, &b[i].x, sizeof(float), 1) != 0 ||
+				read_exact(file, &b[i].y, sizeof(float), 1) != 0) {
+				fclose(file);
+				free_gemm_input(input);
+				fprintf(stderr, "Error al leer datos complejos simples de B\n");
+				return -1;
+			}
+		}
+		for (size_t i = 0; i < c_count; ++i) {
+			if (read_exact(file, &c[i].x, sizeof(float), 1) != 0 ||
+				read_exact(file, &c[i].y, sizeof(float), 1) != 0) {
+				fclose(file);
+				free_gemm_input(input);
+				fprintf(stderr, "Error al leer datos complejos simples de C\n");
+				return -1;
+			}
+		}
+	} else {
+		input->a = malloc(a_count * sizeof(cuDoubleComplex));
+		input->b = malloc(b_count * sizeof(cuDoubleComplex));
+		input->c = malloc(c_count * sizeof(cuDoubleComplex));
+		if (!input->a || !input->b || !input->c) {
+			fclose(file);
+			free_gemm_input(input);
+			return -1;
+		}
 
-    cudaEvent_t start, stop;
-    CHECK_CUDA(cudaEventCreate(&start));
-    CHECK_CUDA(cudaEventCreate(&stop));
+		cuDoubleComplex *a = (cuDoubleComplex *)input->a;
+		cuDoubleComplex *b = (cuDoubleComplex *)input->b;
+		cuDoubleComplex *c = (cuDoubleComplex *)input->c;
+		for (size_t i = 0; i < a_count; ++i) {
+			if (read_exact(file, &a[i].x, sizeof(double), 1) != 0 ||
+				read_exact(file, &a[i].y, sizeof(double), 1) != 0) {
+				fclose(file);
+				free_gemm_input(input);
+				fprintf(stderr, "Error al leer datos complejos dobles de A\n");
+				return -1;
+			}
+		}
+		for (size_t i = 0; i < b_count; ++i) {
+			if (read_exact(file, &b[i].x, sizeof(double), 1) != 0 ||
+				read_exact(file, &b[i].y, sizeof(double), 1) != 0) {
+				fclose(file);
+				free_gemm_input(input);
+				fprintf(stderr, "Error al leer datos complejos dobles de B\n");
+				return -1;
+			}
+		}
+		for (size_t i = 0; i < c_count; ++i) {
+			if (read_exact(file, &c[i].x, sizeof(double), 1) != 0 ||
+				read_exact(file, &c[i].y, sizeof(double), 1) != 0) {
+				fclose(file);
+				free_gemm_input(input);
+				fprintf(stderr, "Error al leer datos complejos dobles de C\n");
+				return -1;
+			}
+		}
+	}
 
-    CHECK_CUDA(cudaEventRecord(start));
-    CHECK_CUBLAS(cublasDgemm(handle, opA, opB, M, N, K,
-                             &alpha, d_a, lda, d_b, ldb, &beta, d_c, ldc));
-    CHECK_CUDA(cudaEventRecord(stop));
-    CHECK_CUDA(cudaEventSynchronize(stop));
-
-    float elapsed_ms = 0.0f;
-    CHECK_CUDA(cudaEventElapsedTime(&elapsed_ms, start, stop));
-
-    CHECK_CUDA(cudaEventDestroy(start));
-    CHECK_CUDA(cudaEventDestroy(stop));
-    CHECK_CUDA(cudaFree(d_a));
-    CHECK_CUDA(cudaFree(d_b));
-    CHECK_CUDA(cudaFree(d_c));
-
-    return static_cast<double>(elapsed_ms) / 1000.0;
+	fclose(file);
+	return 0;
 }
 
-// SGEMM: misma logica de medicion, pero usando float como tipo base.
-double benchmark_sgemm(cublasHandle_t handle, int M, int N, int K,
-                       cublasOperation_t opA, cublasOperation_t opB) {
-    size_t size_a = static_cast<size_t>(M) * K;
-    size_t size_b = static_cast<size_t>(K) * N;
-    size_t size_c = static_cast<size_t>(M) * N;
-    int lda = (opA == CUBLAS_OP_N) ? M : K;
-    int ldb = (opB == CUBLAS_OP_N) ? K : N;
-    int ldc = M;
+static int parse_function_name(const char *name, char *out_precision) {
+	if (!name || !out_precision) {
+		return -1;
+	}
 
-    std::vector<float> h_a(size_a);
-    std::vector<float> h_b(size_b);
-    std::vector<float> h_c(size_c, 0.0f);
+	if (strcasecmp(name, "sgemm") == 0 || strcasecmp(name, "s") == 0) {
+		*out_precision = 'S';
+		return 0;
+	}
+	if (strcasecmp(name, "dgemm") == 0 || strcasecmp(name, "d") == 0) {
+		*out_precision = 'D';
+		return 0;
+	}
+	if (strcasecmp(name, "cgemm") == 0 || strcasecmp(name, "c") == 0) {
+		*out_precision = 'C';
+		return 0;
+	}
+	if (strcasecmp(name, "zgemm") == 0 || strcasecmp(name, "z") == 0) {
+		*out_precision = 'Z';
+		return 0;
+	}
 
-    if (g_loaded_from_file && !g_file_a_f32.empty()) {
-        std::copy(g_file_a_f32.begin(), g_file_a_f32.end(), h_a.begin());
-        std::copy(g_file_b_f32.begin(), g_file_b_f32.end(), h_b.begin());
-    } else {
-        fill_real(h_a);
-        fill_real(h_b);
-    }
-
-    float* d_a = nullptr;
-    float* d_b = nullptr;
-    float* d_c = nullptr;
-
-    CHECK_CUDA(cudaMalloc(&d_a, size_a * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_b, size_b * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_c, size_c * sizeof(float)));
-
-    CHECK_CUDA(cudaMemcpy(d_a, h_a.data(), size_a * sizeof(float), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(d_b, h_b.data(), size_b * sizeof(float), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(d_c, h_c.data(), size_c * sizeof(float), cudaMemcpyHostToDevice));
-
-    const float alpha = 1.0f;
-    const float beta = 0.0f;
-
-    CHECK_CUBLAS(cublasSgemm(handle, opA, opB, M, N, K,
-                             &alpha, d_a, lda, d_b, ldb, &beta, d_c, ldc));
-    CHECK_CUDA(cudaDeviceSynchronize());
-
-    cudaEvent_t start, stop;
-    CHECK_CUDA(cudaEventCreate(&start));
-    CHECK_CUDA(cudaEventCreate(&stop));
-
-    CHECK_CUDA(cudaEventRecord(start));
-    CHECK_CUBLAS(cublasSgemm(handle, opA, opB, M, N, K,
-                             &alpha, d_a, lda, d_b, ldb, &beta, d_c, ldc));
-    CHECK_CUDA(cudaEventRecord(stop));
-    CHECK_CUDA(cudaEventSynchronize(stop));
-
-    float elapsed_ms = 0.0f;
-    CHECK_CUDA(cudaEventElapsedTime(&elapsed_ms, start, stop));
-
-    CHECK_CUDA(cudaEventDestroy(start));
-    CHECK_CUDA(cudaEventDestroy(stop));
-    CHECK_CUDA(cudaFree(d_a));
-    CHECK_CUDA(cudaFree(d_b));
-    CHECK_CUDA(cudaFree(d_c));
-
-    return static_cast<double>(elapsed_ms) / 1000.0;
-}
-// CGEMM: usa cuComplex para matrices complejas en precision simple.
-
-double benchmark_cgemm(cublasHandle_t handle, int M, int N, int K,
-                       cublasOperation_t opA, cublasOperation_t opB) {
-    size_t size_a = static_cast<size_t>(M) * K;
-    size_t size_b = static_cast<size_t>(K) * N;
-    size_t size_c = static_cast<size_t>(M) * N;
-    int lda = (opA == CUBLAS_OP_N) ? M : K;
-    int ldb = (opB == CUBLAS_OP_N) ? K : N;
-    int ldc = M;
-
-    std::vector<cuComplex> h_a(size_a);
-    std::vector<cuComplex> h_b(size_b);
-    std::vector<cuComplex> h_c(size_c, make_cuComplex(0.0f, 0.0f));
-
-    if (g_loaded_from_file && !g_file_a_c32.empty()) {
-        std::copy(g_file_a_c32.begin(), g_file_a_c32.end(), h_a.begin());
-        std::copy(g_file_b_c32.begin(), g_file_b_c32.end(), h_b.begin());
-    } else {
-        fill_complex(h_a);
-        fill_complex(h_b);
-    }
-
-    cuComplex* d_a = nullptr;
-    cuComplex* d_b = nullptr;
-    cuComplex* d_c = nullptr;
-
-    CHECK_CUDA(cudaMalloc(&d_a, size_a * sizeof(cuComplex)));
-    CHECK_CUDA(cudaMalloc(&d_b, size_b * sizeof(cuComplex)));
-    CHECK_CUDA(cudaMalloc(&d_c, size_c * sizeof(cuComplex)));
-
-    CHECK_CUDA(cudaMemcpy(d_a, h_a.data(), size_a * sizeof(cuComplex), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(d_b, h_b.data(), size_b * sizeof(cuComplex), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(d_c, h_c.data(), size_c * sizeof(cuComplex), cudaMemcpyHostToDevice));
-
-    const cuComplex alpha = make_cuComplex(1.0f, 0.0f);
-    const cuComplex beta = make_cuComplex(0.0f, 0.0f);
-
-    CHECK_CUBLAS(cublasCgemm(handle, opA, opB, M, N, K,
-                             &alpha, d_a, lda, d_b, ldb, &beta, d_c, ldc));
-    CHECK_CUDA(cudaDeviceSynchronize());
-
-    cudaEvent_t start, stop;
-    CHECK_CUDA(cudaEventCreate(&start));
-    CHECK_CUDA(cudaEventCreate(&stop));
-
-    CHECK_CUDA(cudaEventRecord(start));
-    CHECK_CUBLAS(cublasCgemm(handle, opA, opB, M, N, K,
-                             &alpha, d_a, lda, d_b, ldb, &beta, d_c, ldc));
-    CHECK_CUDA(cudaEventRecord(stop));
-    CHECK_CUDA(cudaEventSynchronize(stop));
-
-    float elapsed_ms = 0.0f;
-    CHECK_CUDA(cudaEventElapsedTime(&elapsed_ms, start, stop));
-
-    CHECK_CUDA(cudaEventDestroy(start));
-    CHECK_CUDA(cudaEventDestroy(stop));
-    CHECK_CUDA(cudaFree(d_a));
-    CHECK_CUDA(cudaFree(d_b));
-    CHECK_CUDA(cudaFree(d_c));
-
-    return static_cast<double>(elapsed_ms) / 1000.0;
-}
-// ZGEMM: usa cuDoubleComplex para matrices complejas en precision doble.
-
-double benchmark_zgemm(cublasHandle_t handle, int M, int N, int K,
-                       cublasOperation_t opA, cublasOperation_t opB) {
-    size_t size_a = static_cast<size_t>(M) * K;
-    size_t size_b = static_cast<size_t>(K) * N;
-    size_t size_c = static_cast<size_t>(M) * N;
-    int lda = (opA == CUBLAS_OP_N) ? M : K;
-    int ldb = (opB == CUBLAS_OP_N) ? K : N;
-    int ldc = M;
-
-    std::vector<cuDoubleComplex> h_a(size_a);
-    std::vector<cuDoubleComplex> h_b(size_b);
-    std::vector<cuDoubleComplex> h_c(size_c, make_cuDoubleComplex(0.0, 0.0));
-
-    if (g_loaded_from_file && !g_file_a_c64.empty()) {
-        std::copy(g_file_a_c64.begin(), g_file_a_c64.end(), h_a.begin());
-        std::copy(g_file_b_c64.begin(), g_file_b_c64.end(), h_b.begin());
-    } else {
-        fill_complex(h_a);
-        fill_complex(h_b);
-    }
-
-    cuDoubleComplex* d_a = nullptr;
-    cuDoubleComplex* d_b = nullptr;
-    cuDoubleComplex* d_c = nullptr;
-
-    CHECK_CUDA(cudaMalloc(&d_a, size_a * sizeof(cuDoubleComplex)));
-    CHECK_CUDA(cudaMalloc(&d_b, size_b * sizeof(cuDoubleComplex)));
-    CHECK_CUDA(cudaMalloc(&d_c, size_c * sizeof(cuDoubleComplex)));
-
-    CHECK_CUDA(cudaMemcpy(d_a, h_a.data(), size_a * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(d_b, h_b.data(), size_b * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(d_c, h_c.data(), size_c * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice));
-
-    const cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
-    const cuDoubleComplex beta = make_cuDoubleComplex(0.0, 0.0);
-
-    CHECK_CUBLAS(cublasZgemm(handle, opA, opB, M, N, K,
-                             &alpha, d_a, lda, d_b, ldb, &beta, d_c, ldc));
-    CHECK_CUDA(cudaDeviceSynchronize());
-
-    // CUDA Events delimitan la unica ejecucion que se usa para calcular el tiempo.
-    cudaEvent_t start, stop;
-    CHECK_CUDA(cudaEventCreate(&start));
-    CHECK_CUDA(cudaEventCreate(&stop));
-
-    CHECK_CUDA(cudaEventRecord(start));
-    CHECK_CUBLAS(cublasZgemm(handle, opA, opB, M, N, K,
-                             &alpha, d_a, lda, d_b, ldb, &beta, d_c, ldc));
-    CHECK_CUDA(cudaEventRecord(stop));
-    CHECK_CUDA(cudaEventSynchronize(stop));
-
-    float elapsed_ms = 0.0f;
-    CHECK_CUDA(cudaEventElapsedTime(&elapsed_ms, start, stop));
-
-    CHECK_CUDA(cudaEventDestroy(start));
-    CHECK_CUDA(cudaEventDestroy(stop));
-    CHECK_CUDA(cudaFree(d_a));
-    CHECK_CUDA(cudaFree(d_b));
-    CHECK_CUDA(cudaFree(d_c));
-
-    return static_cast<double>(elapsed_ms) / 1000.0;
+	return -1;
 }
 
-// Muestra la ayuda cuando faltan argumentos o el formato de entrada es incorrecto.
-void print_usage(const char* program) {
-    std::cerr << "Uso: " << program << " <M> <N> <K> <precision> [opA opB] [matrix_file]" << std::endl;
-    std::cerr << "precision: S (float), D (double), C (complex float), Z (complex double)" << std::endl;
-    std::cerr << "opA/opB: N (no transpuesta), T (transpuesta), C (conjugada)" << std::endl;
+static int parse_cli(int argc, char **argv, GemmCli *cli) {
+	memset(cli, 0, sizeof(*cli));
+	cli->precision = '\0';
+	cli->op_a = 'N';
+	cli->op_b = 'N';
+	cli->warmup_runs = GEMM_WARMUP_RUNS;
+	cli->iters = GEMM_MEASURE_ITERS;
+
+	const char *positionals[8];
+	int positional_count = 0;
+
+	for (int i = 1; i < argc; ++i) {
+		if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+			return 2;
+		}
+		if (strcmp(argv[i], "--function") == 0 && i + 1 < argc) {
+			if (parse_function_name(argv[++i], &cli->precision) != 0) {
+				fprintf(stderr, "Funcion invalida: %s\n", argv[i]);
+				return -1;
+			}
+			continue;
+		}
+		if (strcmp(argv[i], "--precision") == 0 && i + 1 < argc) {
+			cli->precision = normalize_precision(argv[++i][0]);
+			if (cli->precision == '\0') {
+				fprintf(stderr, "Precision invalida: %s\n", argv[i]);
+				return -1;
+			}
+			continue;
+		}
+		if (strcmp(argv[i], "--m") == 0 && i + 1 < argc) {
+			cli->m = atoi(argv[++i]);
+			continue;
+		}
+		if (strcmp(argv[i], "--n") == 0 && i + 1 < argc) {
+			cli->n = atoi(argv[++i]);
+			continue;
+		}
+		if (strcmp(argv[i], "--k") == 0 && i + 1 < argc) {
+			cli->k = atoi(argv[++i]);
+			continue;
+		}
+		if (strcmp(argv[i], "--size") == 0 && i + 1 < argc) {
+			int size = atoi(argv[++i]);
+			cli->m = size;
+			cli->n = size;
+			cli->k = size;
+			continue;
+		}
+		if (strcmp(argv[i], "--source") == 0 && i + 1 < argc) {
+			cli->source_path = argv[++i];
+			continue;
+		}
+		if (strcmp(argv[i], "--matrix-file") == 0 && i + 1 < argc) {
+			cli->source_path = argv[++i];
+			continue;
+		}
+		if (strcmp(argv[i], "--op-a") == 0 && i + 1 < argc) {
+			cli->op_a = normalize_op(argv[++i][0]);
+			if (cli->op_a == '\0') {
+				fprintf(stderr, "OpA invalida: %s\n", argv[i]);
+				return -1;
+			}
+			continue;
+		}
+		if (strcmp(argv[i], "--op-b") == 0 && i + 1 < argc) {
+			cli->op_b = normalize_op(argv[++i][0]);
+			if (cli->op_b == '\0') {
+				fprintf(stderr, "OpB invalida: %s\n", argv[i]);
+				return -1;
+			}
+			continue;
+		}
+		if (strcmp(argv[i], "--warmup") == 0 && i + 1 < argc) {
+			cli->warmup_runs = atoi(argv[++i]);
+			continue;
+		}
+		if (strcmp(argv[i], "--iters") == 0 && i + 1 < argc) {
+			cli->iters = atoi(argv[++i]);
+			continue;
+		}
+
+		if (argv[i][0] == '-' && argv[i][1] == '-') {
+			fprintf(stderr, "Opcion desconocida: %s\n", argv[i]);
+			return -1;
+		}
+
+		if (positional_count < 8) {
+			positionals[positional_count++] = argv[i];
+		}
+	}
+
+	if (positional_count > 0) {
+		if (positional_count < 4) {
+			fprintf(stderr, "Uso legacy: %s M N K <S|D|C|Z> [OpA] [OpB] [matrix_file]\n", argv[0]);
+			return -1;
+		}
+		cli->m = atoi(positionals[0]);
+		cli->n = atoi(positionals[1]);
+		cli->k = atoi(positionals[2]);
+		cli->precision = normalize_precision(positionals[3][0]);
+		if (cli->precision == '\0') {
+			fprintf(stderr, "Precision invalida: %s\n", positionals[3]);
+			return -1;
+		}
+		if (positional_count >= 5) {
+			cli->op_a = normalize_op(positionals[4][0]);
+			if (cli->op_a == '\0') {
+				fprintf(stderr, "OpA invalida: %s\n", positionals[4]);
+				return -1;
+			}
+		}
+		if (positional_count >= 6) {
+			cli->op_b = normalize_op(positionals[5][0]);
+			if (cli->op_b == '\0') {
+				fprintf(stderr, "OpB invalida: %s\n", positionals[5]);
+				return -1;
+			}
+		}
+		if (positional_count >= 7) {
+			cli->source_path = positionals[6];
+		}
+	}
+
+	if (cli->m <= 0 || cli->n <= 0 || cli->k <= 0) {
+		fprintf(stderr, "Las dimensiones M, N y K deben ser positivas\n");
+		return -1;
+	}
+	if (cli->precision == '\0') {
+		fprintf(stderr, "Debes indicar la precision o la funcion GEMM\n");
+		return -1;
+	}
+	if (!cli->source_path || !*cli->source_path) {
+		fprintf(stderr, "Debes indicar el archivo de origen con --source o como argumento final\n");
+		return -1;
+	}
+	if (cli->warmup_runs < 0 || cli->iters <= 0) {
+		fprintf(stderr, "Warmup e iters deben ser positivos\n");
+		return -1;
+	}
+
+	return 0;
 }
-// Convierte el caracter de la CLI al enum que cuBLAS espera.
 
-cublasOperation_t parse_op(char op) {
-    char upper = static_cast<char>(std::toupper(op));
-    if (upper == 'N') {
-        return CUBLAS_OP_N;
-    }
-    if (upper == 'T') {
-        return CUBLAS_OP_T;
-    }
-    if (upper == 'C') {
-        return CUBLAS_OP_C;
-    }
+static int run_sgemm_case(
+	cublasHandle_t handle,
+	const GemmInput *input,
+	char op_a,
+	char op_b,
+	int warmup_runs,
+	int iters,
+	double *out_time_sec) {
+	float *h_a = (float *)input->a;
+	float *h_b = (float *)input->b;
+	float *h_c = (float *)input->c;
+	float *d_a = NULL;
+	float *d_b = NULL;
+	float *d_c = NULL;
+	size_t a_bytes = (size_t)input->m * (size_t)input->k * sizeof(float);
+	size_t b_bytes = (size_t)input->k * (size_t)input->n * sizeof(float);
+	size_t c_bytes = (size_t)input->m * (size_t)input->n * sizeof(float);
+	cublasOperation_t c_op_a = to_cublas_op(op_a, input->precision);
+	cublasOperation_t c_op_b = to_cublas_op(op_b, input->precision);
+	const float alpha = 1.0f;
+	const float beta = 0.0f;
 
-    std::cerr << "Error: op debe ser N, T o C." << std::endl;
-    std::exit(EXIT_FAILURE);
+	CHECK_CUDA(cudaMalloc((void **)&d_a, a_bytes));
+	CHECK_CUDA(cudaMalloc((void **)&d_b, b_bytes));
+	CHECK_CUDA(cudaMalloc((void **)&d_c, c_bytes));
+
+	for (int i = 0; i < warmup_runs; ++i) {
+		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUBLAS(cublasSgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
+								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
+		CHECK_CUDA(cudaDeviceSynchronize());
+		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
+	}
+
+	double start = monotonic_time_sec();
+	for (int i = 0; i < iters; ++i) {
+		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUBLAS(cublasSgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
+								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
+		CHECK_CUDA(cudaDeviceSynchronize());
+		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
+	}
+	double end = monotonic_time_sec();
+
+	*out_time_sec = (end - start) / (double)iters;
+
+	cudaFree(d_a);
+	cudaFree(d_b);
+	cudaFree(d_c);
+	return 0;
 }
-// El caso base usa NxN sin transposicion; opA/opB solo se leen si se pasan.
 
-int main(int argc, char** argv) {
-    if (argc != 5 && argc != 7 && argc != 8) {
-        print_usage(argv[0]);
-        return EXIT_FAILURE;
-    }
+static int run_dgemm_case(
+	cublasHandle_t handle,
+	const GemmInput *input,
+	char op_a,
+	char op_b,
+	int warmup_runs,
+	int iters,
+	double *out_time_sec) {
+	double *h_a = (double *)input->a;
+	double *h_b = (double *)input->b;
+	double *h_c = (double *)input->c;
+	double *d_a = NULL;
+	double *d_b = NULL;
+	double *d_c = NULL;
+	size_t a_bytes = (size_t)input->m * (size_t)input->k * sizeof(double);
+	size_t b_bytes = (size_t)input->k * (size_t)input->n * sizeof(double);
+	size_t c_bytes = (size_t)input->m * (size_t)input->n * sizeof(double);
+	cublasOperation_t c_op_a = to_cublas_op(op_a, input->precision);
+	cublasOperation_t c_op_b = to_cublas_op(op_b, input->precision);
+	const double alpha = 1.0;
+	const double beta = 0.0;
 
-    init_seed_from_env();
+	CHECK_CUDA(cudaMalloc((void **)&d_a, a_bytes));
+	CHECK_CUDA(cudaMalloc((void **)&d_b, b_bytes));
+	CHECK_CUDA(cudaMalloc((void **)&d_c, c_bytes));
 
-    int M = std::atoi(argv[1]);
-    int N = std::atoi(argv[2]);
-    int K = std::atoi(argv[3]);
-    std::string precision = argv[4];
-    std::string op_a_str = "N";
-    std::string op_b_str = "N";
-    const char *matrix_file = nullptr;
+	for (int i = 0; i < warmup_runs; ++i) {
+		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUBLAS(cublasDgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
+								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
+		CHECK_CUDA(cudaDeviceSynchronize());
+		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
+	}
 
-    if (argc == 7) {
-        op_a_str = argv[5];
-        op_b_str = argv[6];
-    } else if (argc == 8) {
-        op_a_str = argv[5];
-        op_b_str = argv[6];
-        matrix_file = argv[7];
-    }
+	double start = monotonic_time_sec();
+	for (int i = 0; i < iters; ++i) {
+		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUBLAS(cublasDgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
+								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
+		CHECK_CUDA(cudaDeviceSynchronize());
+		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
+	}
+	double end = monotonic_time_sec();
 
-    if (M <= 0 || N <= 0 || K <= 0) {
-        std::cerr << "Error: M, N, K deben ser positivos." << std::endl;
-        return EXIT_FAILURE;
-    }
+	*out_time_sec = (end - start) / (double)iters;
 
-    if (precision.size() != 1) {
-        std::cerr << "Error: precision invalida." << std::endl;
-        return EXIT_FAILURE;
-    }
-    if (op_a_str.size() != 1 || op_b_str.size() != 1) {
-        std::cerr << "Error: opA y opB deben ser un caracter (N/T/C)." << std::endl;
-        return EXIT_FAILURE;
-    }
+	cudaFree(d_a);
+	cudaFree(d_b);
+	cudaFree(d_c);
+	return 0;
+}
 
-    if (matrix_file) {
-        char file_prec = '\0';
-        if (load_gemm_matrices_from_file(matrix_file, &M, &N, &K, &file_prec) != 0) {
-            std::cerr << "Error: no se pudo cargar el archivo de matrices." << std::endl;
-            return EXIT_FAILURE;
-        }
-        precision[0] = static_cast<char>(std::toupper(file_prec));
-    }
-// Normaliza las operaciones y las convierte al formato de cuBLAS.
-    
-    char opA_char = static_cast<char>(std::toupper(op_a_str[0]));
-    char opB_char = static_cast<char>(std::toupper(op_b_str[0]));
-    cublasOperation_t opA = parse_op(opA_char);
-    cublasOperation_t opB = parse_op(opB_char);
+static int run_cgemm_case(
+	cublasHandle_t handle,
+	const GemmInput *input,
+	char op_a,
+	char op_b,
+	int warmup_runs,
+	int iters,
+	double *out_time_sec) {
+	cuComplex *h_a = (cuComplex *)input->a;
+	cuComplex *h_b = (cuComplex *)input->b;
+	cuComplex *h_c = (cuComplex *)input->c;
+	cuComplex *d_a = NULL;
+	cuComplex *d_b = NULL;
+	cuComplex *d_c = NULL;
+	size_t a_bytes = (size_t)input->m * (size_t)input->k * sizeof(cuComplex);
+	size_t b_bytes = (size_t)input->k * (size_t)input->n * sizeof(cuComplex);
+	size_t c_bytes = (size_t)input->m * (size_t)input->n * sizeof(cuComplex);
+	cublasOperation_t c_op_a = to_cublas_op(op_a, input->precision);
+	cublasOperation_t c_op_b = to_cublas_op(op_b, input->precision);
+	const cuComplex alpha = make_cuComplex(1.0f, 0.0f);
+	const cuComplex beta = make_cuComplex(0.0f, 0.0f);
 
-    cublasHandle_t handle;
-    CHECK_CUBLAS(cublasCreate(&handle));
+	CHECK_CUDA(cudaMalloc((void **)&d_a, a_bytes));
+	CHECK_CUDA(cudaMalloc((void **)&d_b, b_bytes));
+	CHECK_CUDA(cudaMalloc((void **)&d_c, c_bytes));
 
-    double time_sec = 0.0;
-    char p = static_cast<char>(std::toupper(precision[0]));
-// Selecciona la rutina GEMM segun la precision pedida en la CLI.
-    
-    switch (p) {
-        case 'S':
-            time_sec = benchmark_sgemm(handle, M, N, K, opA, opB);
-            break;
-        case 'D':
-            time_sec = benchmark_dgemm(handle, M, N, K, opA, opB);
-            break;
-        case 'C':
-            time_sec = benchmark_cgemm(handle, M, N, K, opA, opB);
-            break;
-        case 'Z':
-            time_sec = benchmark_zgemm(handle, M, N, K, opA, opB);
-            break;
-        default:
-            std::cerr << "Error: precision debe ser S, D, C o Z." << std::endl;
-            CHECK_CUBLAS(cublasDestroy(handle));
-            return EXIT_FAILURE;
-    }
+	for (int i = 0; i < warmup_runs; ++i) {
+		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUBLAS(cublasCgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
+								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
+		CHECK_CUDA(cudaDeviceSynchronize());
+		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
+	}
 
-    CHECK_CUBLAS(cublasDestroy(handle));
+	double start = monotonic_time_sec();
+	for (int i = 0; i < iters; ++i) {
+		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUBLAS(cublasCgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
+								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
+		CHECK_CUDA(cudaDeviceSynchronize());
+		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
+	}
+	double end = monotonic_time_sec();
 
-    std::cout << "M=" << M
-              << " N=" << N
-              << " K=" << K
-              << " Precision=" << p
-              << " OpA=" << opA_char
-              << " OpB=" << opB_char
-              << " Time_sec=" << std::fixed << std::setprecision(9) << time_sec
-              << std::endl;
+	*out_time_sec = (end - start) / (double)iters;
 
-    return EXIT_SUCCESS;
+	cudaFree(d_a);
+	cudaFree(d_b);
+	cudaFree(d_c);
+	return 0;
+}
+
+static int run_zgemm_case(
+	cublasHandle_t handle,
+	const GemmInput *input,
+	char op_a,
+	char op_b,
+	int warmup_runs,
+	int iters,
+	double *out_time_sec) {
+	cuDoubleComplex *h_a = (cuDoubleComplex *)input->a;
+	cuDoubleComplex *h_b = (cuDoubleComplex *)input->b;
+	cuDoubleComplex *h_c = (cuDoubleComplex *)input->c;
+	cuDoubleComplex *d_a = NULL;
+	cuDoubleComplex *d_b = NULL;
+	cuDoubleComplex *d_c = NULL;
+	size_t a_bytes = (size_t)input->m * (size_t)input->k * sizeof(cuDoubleComplex);
+	size_t b_bytes = (size_t)input->k * (size_t)input->n * sizeof(cuDoubleComplex);
+	size_t c_bytes = (size_t)input->m * (size_t)input->n * sizeof(cuDoubleComplex);
+	cublasOperation_t c_op_a = to_cublas_op(op_a, input->precision);
+	cublasOperation_t c_op_b = to_cublas_op(op_b, input->precision);
+	const cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
+	const cuDoubleComplex beta = make_cuDoubleComplex(0.0, 0.0);
+
+	CHECK_CUDA(cudaMalloc((void **)&d_a, a_bytes));
+	CHECK_CUDA(cudaMalloc((void **)&d_b, b_bytes));
+	CHECK_CUDA(cudaMalloc((void **)&d_c, c_bytes));
+
+	for (int i = 0; i < warmup_runs; ++i) {
+		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUBLAS(cublasZgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
+								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
+		CHECK_CUDA(cudaDeviceSynchronize());
+		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
+	}
+
+	double start = monotonic_time_sec();
+	for (int i = 0; i < iters; ++i) {
+		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUBLAS(cublasZgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
+								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
+		CHECK_CUDA(cudaDeviceSynchronize());
+		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
+	}
+	double end = monotonic_time_sec();
+
+	*out_time_sec = (end - start) / (double)iters;
+
+	cudaFree(d_a);
+	cudaFree(d_b);
+	cudaFree(d_c);
+	return 0;
+}
+
+static int print_usage(const char *program) {
+	fprintf(stderr, "Uso legacy: %s M N K <S|D|C|Z> [OpA] [OpB] [matrix_file]\n", program);
+	fprintf(stderr, "Modo flags: %s --m M --n N --k K --precision S --op-a N --op-b N --source matrices.bin\n", program);
+	fprintf(stderr, "Alias de funcion: --function sgemm|dgemm|cgemm|zgemm\n");
+	return 2;
+}
+
+int main(int argc, char **argv) {
+	GemmCli cli;
+	int parse_rc = parse_cli(argc, argv, &cli);
+	if (parse_rc == 2) {
+		return print_usage(argv[0]);
+	}
+	if (parse_rc != 0) {
+		return print_usage(argv[0]);
+	}
+
+	GemmInput input;
+	if (load_gemm_input_from_file(cli.source_path, &input) != 0) {
+		return 1;
+	}
+
+	if (cli.m != input.m || cli.n != input.n || cli.k != input.k) {
+		fprintf(stderr, "Aviso: las dimensiones del archivo de matrices sobreescriben M/N/K del CLI\n");
+	}
+	if (cli.precision != input.precision) {
+		fprintf(stderr, "Aviso: la precision del archivo de matrices sobreescribe la del CLI\n");
+	}
+
+	cublasHandle_t handle = NULL;
+	CHECK_CUDA(cudaSetDevice(0));
+	CHECK_CUBLAS(cublasCreate(&handle));
+
+	double time_sec = 0.0;
+	int rc = 0;
+
+	switch (input.precision) {
+		case 'S':
+			rc = run_sgemm_case(handle, &input, cli.op_a, cli.op_b, cli.warmup_runs, cli.iters, &time_sec);
+			break;
+		case 'D':
+			rc = run_dgemm_case(handle, &input, cli.op_a, cli.op_b, cli.warmup_runs, cli.iters, &time_sec);
+			break;
+		case 'C':
+			rc = run_cgemm_case(handle, &input, cli.op_a, cli.op_b, cli.warmup_runs, cli.iters, &time_sec);
+			break;
+		case 'Z':
+			rc = run_zgemm_case(handle, &input, cli.op_a, cli.op_b, cli.warmup_runs, cli.iters, &time_sec);
+			break;
+		default:
+			fprintf(stderr, "Precision invalida: %c\n", input.precision);
+			rc = 1;
+			break;
+	}
+
+	int final_m = input.m;
+	int final_n = input.n;
+	int final_k = input.k;
+	char final_precision = input.precision;
+	char final_op_a = cli.op_a;
+	char final_op_b = cli.op_b;
+
+	if (handle) {
+		cublasDestroy(handle);
+	}
+	free_gemm_input(&input);
+
+	if (rc != 0) {
+		return 1;
+	}
+
+	printf("M=%d N=%d K=%d Precision=%c OpA=%c OpB=%c Time_sec=%.9f\n",
+		   final_m,
+		   final_n,
+		   final_k,
+		   final_precision,
+		   final_op_a,
+		   final_op_b,
+		   time_sec);
+	return 0;
 }
