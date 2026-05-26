@@ -6,65 +6,56 @@ Orquestador de benchmarking GEMM/FFT para CPU o GPU.
 Instala `h5py` en el mismo entorno donde ejecutas este script: `python3 -m pip install h5py`.
 GUIA DE USO
 -----------
-Modo GPU (usa el binario CUDA `gemm_gpu`):
-    python3 benchmark_runner.py --device gpu --binary ./algoritmos/gemm_gpu
+Modo GPU (usa los binarios CUDA):
+    python3 benchmark_runner.py --device gpu --gemm-binary-gpu ./algoritmos/gemm_gpu
 
-Modo CPU (usa `gemm_cpu_mkl` u otro binario BLAS compatible):
-    python3 benchmark_runner.py --device cpu --binary ./algoritmos/gemm_cpu
+Modo CPU (usa los binarios C/BLAS/FFTW):
+    python3 benchmark_runner.py --device cpu --gemm-binary-cpu ./algoritmos/gemm_cpu
 
-Barrido rapido de prueba:
-    python3 benchmark_runner.py --device cpu --binary ./algoritmos/gemm_cpu --sizes 128 --precisions S --output cpu_results.csv
+Barrido Híbrido Alternado (Recomendado):
+    python3 benchmark_runner.py --benchmark gemm --device both --sizes 128,256,512,1024
 
-Barrido cuadrado por defecto (M=N=K):
-    python3 benchmark_runner.py --device gpu
+Barrido GEMM con variaciones de Transpuestas (OpA / OpB):
+    python3 benchmark_runner.py --benchmark gemm --device both --sweep-transpose --op-a-list N,T,C --op-b-list N,T,C
 
-Barrido completo de dimensiones (M, N y K independientes):
-    python3 benchmark_runner.py --full-dim-sweep
-
-Barrido con transposiciones en A y B:
-    python3 benchmark_runner.py --sweep-transpose --op-a-list N,T,C --op-b-list N,T,C
-
-Modo FFT (CPU+GPU en una sola ejecucion):
-    python3 benchmark_runner.py --benchmark fft --device both
-
-FFT con barrido personalizado:
-    python3 benchmark_runner.py --benchmark fft --device gpu \
-        --fft-sizes-1d 1024,2048 --fft-sizes-2d 64x64 --fft-batches 1,4
+Modo FFT con barrido estricto 1D (aislado):
+    python3 benchmark_runner.py --benchmark fft --device both \
+        --fft-sizes-1d 1024,2048 --fft-sizes-2d " " --fft-sizes-3d " "
 
 OPCIONES PRINCIPALES
 --------------------
     --benchmark         Benchmark a ejecutar: gemm o fft
-    --device            Dispositivo donde correr el benchmark: gpu, cpu o both (solo FFT)
-    --binary            Ruta al binario GEMM a ejecutar
-    --sizes             Lista separada por coma para los tamanos base
-    --precisions        Precisiones a probar: S, D, C, Z
-    --full-dim-sweep    Activa combinacion completa de M x N x K
-    --sweep-transpose   Activa barrido de OpA / OpB
-    --op-a-list         Operaciones posibles para la matriz A: N, T, C
-    --op-b-list         Operaciones posibles para la matriz B: N, T, C
-    --gpu-index         Indice de GPU para NVML cuando device=gpu
+    --device            Dispositivo donde correr el benchmark: gpu, cpu o both
+    --gemm-binary-cpu   Ruta al binario GEMM CPU
+    --gemm-binary-gpu   Ruta al binario GEMM GPU
+    --fft-binary-cpu    Ruta al binario FFT CPU
+    --fft-binary-gpu    Ruta al binario FFT GPU
+    --sizes             Lista separada por coma para los tamanos base (GEMM)
+    --sweep-transpose   Activa el barrido sistemático de OpA / OpB para GEMM
+    --op-a-list         Operaciones posibles para la matriz A (N, T, C)
+    --op-b-list         Operaciones posibles para la matriz B (N, T, C)
+    --fft-sizes-1d      Lista de tamaños 1D para FFT
     --output            Archivo CSV de salida
-    --timeout           Timeout por caso en segundos
 
-SALIDA CSV
-----------
-Columnas generadas:
-    M, N, K, Precision, OpA, OpB, Time_sec, GFLOPS, Avg_Power_W, Energy_J, EDP
+SALIDA CSV (GEMM / FFT)
+-----------------------
+Columnas generadas incluyen detalles específicos (M,N,K para GEMM; Nx,Ny,Nz,Batch,Domain para FFT) más las métricas universales:
+    Time_sec, GFLOPS, Avg_Power_W, Energy_J, EDP
 
 Interpretacion:
-    Time_sec     -> tiempo medido por el binario
-    GFLOPS       -> rendimiento calculado a partir de M, N, K y la precision
-    Avg_Power_W  -> potencia media estimada durante el caso
-    Energy_J     -> energia consumida durante el caso
-    EDP          -> Energy-Delay Product
+    Time_sec     -> Tiempo puro de ejecución del kernel, medido en fase de aislamiento de métricas.
+    GFLOPS       -> Rendimiento calculado a partir de las dimensiones, la precisión y Time_sec.
+    Avg_Power_W  -> Potencia media consumida durante la fase secundaria de monitoreo activo.
+    Energy_J     -> Energía total gastada (calculada integrando muestras NVML/RAPL).
+    EDP          -> Producto Energía-Retraso (Energy-Delay Product = Energy_J * Time_sec).
 
-NOTAS
------
-    - En GPU, la potencia se lee con NVML.
-    - En CPU, se intenta leer RAPL desde /sys/class/powercap.
-    - Si RAPL no esta disponible, el runner sigue y deja potencia/energia en 0.0.
-    - La salida del binario debe incluir una linea con `Time_sec=...`.
-      
+NOTAS HPC Y RIGOR
+-----------------
+    - Aislamiento de Métricas: Cada prueba ejecuta el binario dos veces. La primera (sin hilos de monitoreo) obtiene el tiempo exacto; la segunda (con hilos de lectura NVML/RAPL activos) extrae el perfil energético.
+    - Warm-ups: Se corren iteraciones previas (por defecto 4) para inicializar bibliotecas (cuBLAS/FFTW) y estabilizar relojes/Turbo Boost.
+    - Consumo en GPU: Se calcula a partir del API de NVML.
+    - Consumo en CPU: Usa un hilo demonio inactivo que intercepta lecturas precisas de Intel RAPL en /sys/class/powercap.
+    - Tolerancia Zero-Time: Tiempos reportados de ejecución por debajo del microsegundo (0.0s) se reajustan internamente al límite teórico de 1 nanosegundo (1e-9) para evitar crasheos (ZeroDivisionError) en barridos masivos de arrays mínimos.
 """
 
 import argparse
