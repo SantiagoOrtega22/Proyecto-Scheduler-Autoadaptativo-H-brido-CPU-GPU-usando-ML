@@ -7,6 +7,7 @@ algoritmos/gemm_gpu
 # Archivos de datos autogenerados (Bancos de benchmarks)
 bench_files/*.h5
 bench_files/*.bin
+bench_files/databank/
 
 # Resultados de los benchmarks
 *.csv

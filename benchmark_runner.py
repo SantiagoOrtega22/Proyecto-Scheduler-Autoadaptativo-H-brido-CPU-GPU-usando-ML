@@ -76,6 +76,25 @@ import tempfile
 
 import pynvml
 
+# DataBankManager: banco de datos binario con política Lazy Cache.
+# Se importa de forma diferida para no bloquear si numpy no está disponible.
+_DATA_BANK_MANAGER_MODULE = None
+
+def _get_data_bank_manager_cls():
+    """Importa DataBankManager de forma diferida."""
+    global _DATA_BANK_MANAGER_MODULE
+    if _DATA_BANK_MANAGER_MODULE is None:
+        import importlib.util, pathlib
+        _here = pathlib.Path(__file__).parent
+        spec = importlib.util.spec_from_file_location(
+            "data_bank_manager",
+            _here / "bench_files" / "data_bank_manager.py",
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _DATA_BANK_MANAGER_MODULE = mod
+    return _DATA_BANK_MANAGER_MODULE.DataBankManager
+
 # Expresion regular para extraer el tiempo reportado por el binario CUDA.
 TIME_PATTERN = re.compile(r"Time_sec=([0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)")
 FFT_TIME_PATTERN = re.compile(
@@ -85,6 +104,9 @@ FFT_TIME_PATTERN = re.compile(
 
 _RAPL_WARNING_SHOWN = False
 POWER_SAMPLE_INTERVAL_SEC = 0.02
+
+DEFAULT_DATABANK_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bench_files", "databank")
+DEFAULT_DATABANK_MAX_N = 8192
 
 DEFAULT_BENCHMARK_BANK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bench_files", "benchmark_bank.h5")
 
@@ -605,111 +627,159 @@ def find_rapl_energy_path():
     return None
 
 
-def generate_gemm_matrix_file(m, n, k, precision, seed=None, bank_path=None, bank_profile="dense_normal"):
-    """Genera archivo binario con matrices GEMM determinísticas."""
-    h5py = _require_h5py()
+def generate_gemm_matrix_file(
+    m, n, k, precision,
+    seed=None, bank_path=None, bank_profile="dense_normal",
+    databank_dir=None, databank_max_n=None,
+):
+    """Retorna la ruta a un archivo GEMM kernel-ready usando DataBankManager.
+
+    Política:
+        1. DataBankManager (banco binario persistente, lazy) — ruta primaria.
+        2. Banco HDF5 legacy (solo S/D, solo tamaños pre-generados).
+        3. Generación aleatoria en memoria → archivo temporal.
+
+    Args:
+        m, n, k: Dimensiones de las matrices.
+        precision: S, D, C o Z.
+        seed: Semilla aleatoria (solo para fallback temporal).
+        bank_path: Ruta al HDF5 legacy (opcional).
+        bank_profile: Perfil en el banco HDF5 / DataBankManager.
+        databank_dir: Raíz del banco binario. None usa DEFAULT_DATABANK_DIR.
+        databank_max_n: Techo N para el banco. None usa DEFAULT_DATABANK_MAX_N.
+
+    Returns:
+        tuple[str, bool]: (ruta_archivo, es_persistente).
+            es_persistente=True  → NO borrar al terminar.
+            es_persistente=False → archivo temporal, borrar en finally.
+    """
+    # ── Ruta primaria: DataBankManager (binario plano, lazy) ──────────────────
+    try:
+        DataBankManager = _get_data_bank_manager_cls()
+        db_dir = databank_dir or DEFAULT_DATABANK_DIR
+        db_max = databank_max_n or DEFAULT_DATABANK_MAX_N
+        mgr = DataBankManager(base_dir=db_dir, max_n=db_max)
+        path = mgr.get_gemm_path(m, n, k, precision, profile=bank_profile)
+        return path, True
+    except Exception:
+        pass  # Fallback al banco HDF5 o generación aleatoria
+
+    # ── Fallback 1: banco HDF5 legacy (solo S/D cuadradas) ───────────────────
     if bank_path and precision in {"S", "D"} and m == n == k:
-        dataset_root = f"/gemm/N{m}/{bank_profile}"
-        a_key = f"{dataset_root}/A_{'f64' if precision == 'D' else 'f32'}"
-        b_key = f"{dataset_root}/B_{'f64' if precision == 'D' else 'f32'}"
-        if bank_dataset_exists(bank_path, a_key) and bank_dataset_exists(bank_path, b_key):
-            with h5py.File(bank_path, "r") as hf:
-                a_values = hf[a_key][()]
-                b_values = hf[b_key][()]
-            c_values = [0.0] * (m * n)
-            return write_gemm_matrix_file_from_arrays(
-                m,
-                n,
-                k,
-                precision,
-                a_values.ravel(),
-                b_values.ravel(),
-                c_values,
-            )
+        try:
+            h5py = _require_h5py()
+            dataset_root = f"/gemm/N{m}/{bank_profile}"
+            a_key = f"{dataset_root}/A_{'f64' if precision == 'D' else 'f32'}"
+            b_key = f"{dataset_root}/B_{'f64' if precision == 'D' else 'f32'}"
+            if bank_dataset_exists(bank_path, a_key) and bank_dataset_exists(bank_path, b_key):
+                with h5py.File(bank_path, "r") as hf:
+                    a_values = hf[a_key][()]
+                    b_values = hf[b_key][()]
+                c_values = [0.0] * (m * n)
+                return write_gemm_matrix_file_from_arrays(
+                    m, n, k, precision,
+                    a_values.ravel(), b_values.ravel(), c_values,
+                ), False
+        except Exception:
+            pass
 
+    # ── Fallback 2: generación aleatoria (archivo temporal) ──────────────────
     if seed is not None:
         random.seed(seed)
     else:
-        seed = random.randint(0, 2**31 - 1)
-        random.seed(seed)
-    
-    # Generar datos
-    if precision == 'S':
+        random.seed(random.randint(0, 2**31 - 1))
+
+    if precision in ("S", "D"):
         A = [random.random() for _ in range(m * k)]
         B = [random.random() for _ in range(k * n)]
         C = [0.0] * (m * n)
-    elif precision == 'D':
-        A = [random.random() for _ in range(m * k)]
-        B = [random.random() for _ in range(k * n)]
-        C = [0.0] * (m * n)
-    elif precision == 'C':
-        A = [(random.random(), random.random()) for _ in range(m * k)]
-        B = [(random.random(), random.random()) for _ in range(k * n)]
-        C = [(0.0, 0.0)] * (m * n)
-    elif precision == 'Z':
-        A = [(random.random(), random.random()) for _ in range(m * k)]
-        B = [(random.random(), random.random()) for _ in range(k * n)]
-        C = [(0.0, 0.0)] * (m * n)
     else:
-        raise ValueError(f"Precision invalida: {precision}")
-    
-    return write_gemm_matrix_file_from_arrays(m, n, k, precision, A, B, C)
+        A = [(random.random(), random.random()) for _ in range(m * k)]
+        B = [(random.random(), random.random()) for _ in range(k * n)]
+        C = [(0.0, 0.0)] * (m * n)
+
+    return write_gemm_matrix_file_from_arrays(m, n, k, precision, A, B, C), False
 
 
-def generate_fft_matrix_file(nx, ny, nz, batch, precision, domain, layout, seed=None, bank_path=None, bank_profile="broadband"):
-    h5py = _require_h5py()
+def generate_fft_matrix_file(
+    nx, ny, nz, batch, precision, domain, layout,
+    seed=None, bank_path=None, bank_profile="broadband",
+    databank_dir=None, databank_max_n=None,
+):
+    """Retorna la ruta a un archivo FFT kernel-ready usando DataBankManager.
+
+    Política:
+        1. DataBankManager (banco binario persistente, lazy) — ruta primaria.
+        2. Banco HDF5 legacy (solo 1D, solo tamaños pre-generados).
+        3. Generación aleatoria en memoria → archivo temporal.
+
+    Args:
+        nx, ny, nz: Dimensiones del transform (ny=nz=0 para 1D).
+        batch: Número de transforms.
+        precision: S o D.
+        domain: C2C, R2C o C2R.
+        layout: I (in-place) u O (out-of-place); solo para referencia del caller.
+        seed, bank_path, bank_profile, databank_dir, databank_max_n: Igual que GEMM.
+
+    Returns:
+        tuple[str, bool]: (ruta_archivo, es_persistente).
+    """
+    # ── Ruta primaria: DataBankManager ────────────────────────────────────────
+    try:
+        DataBankManager = _get_data_bank_manager_cls()
+        db_dir = databank_dir or DEFAULT_DATABANK_DIR
+        db_max = databank_max_n or DEFAULT_DATABANK_MAX_N
+        mgr = DataBankManager(base_dir=db_dir, max_n=db_max)
+        path = mgr.get_fft_path(nx, ny, nz, batch, precision, domain, profile=bank_profile)
+        return path, True
+    except Exception:
+        pass
+
+    # ── Fallback 1: banco HDF5 legacy (solo 1D) ───────────────────────────────
     if bank_path and ny == 0 and nz == 0:
-        dataset_root = f"/fft/N{nx}/{bank_profile}"
-        if domain == "C2C":
-            label = "c128" if precision == "D" else "c64"
-        elif domain == "R2C":
-            label = "f64" if precision == "D" else "f32"
-        else:
-            label = "c128" if precision == "D" else "c64"
-
-        dataset_key = f"{dataset_root}/{label}"
-        if bank_dataset_exists(bank_path, dataset_key):
-            with h5py.File(bank_path, "r") as hf:
-                payload = list(hf[dataset_key][()])
-
-            if batch > 1:
-                payload = payload * batch
-
+        try:
+            h5py = _require_h5py()
+            dataset_root = f"/fft/N{nx}/{bank_profile}"
             if domain == "C2C":
-                input_values = payload
-                output_values = [0j] * len(payload)
+                label = "c128" if precision == "D" else "c64"
             elif domain == "R2C":
-                input_values = payload
-                output_values = [0j] * (nx * batch)
+                label = "f64" if precision == "D" else "f32"
             else:
-                input_values = payload
-                output_values = [0.0] * (nx * batch)
+                label = "c128" if precision == "D" else "c64"
+            dataset_key = f"{dataset_root}/{label}"
+            if bank_dataset_exists(bank_path, dataset_key):
+                with h5py.File(bank_path, "r") as hf:
+                    payload = list(hf[dataset_key][()])
+                if batch > 1:
+                    payload = payload * batch
+                if domain == "C2C":
+                    input_values, output_values = payload, [0j] * len(payload)
+                elif domain == "R2C":
+                    input_values = payload
+                    output_values = [0j] * (nx * batch)
+                else:
+                    input_values = payload
+                    output_values = [0.0] * (nx * batch)
+                return write_fft_matrix_file_from_arrays(
+                    nx, ny, nz, batch, precision, domain,
+                    input_values, output_values,
+                ), False
+        except Exception:
+            pass
 
-            return write_fft_matrix_file_from_arrays(
-                nx,
-                ny,
-                nz,
-                batch,
-                precision,
-                domain,
-                input_values,
-                output_values,
-            )
-
+    # ── Fallback 2: generación aleatoria en memoria ───────────────────────────
     if seed is not None:
         random.seed(seed)
-
-    if domain == "C2C":
-        nreal = 1
-        for d in [nx, ny, nz]:
-            if d > 0:
-                nreal *= d
-        nreal *= batch
-        input_values = [complex(random.random(), random.random()) for _ in range(nreal)]
-        output_values = [0j] * nreal
-        return write_fft_matrix_file_from_arrays(nx, ny, nz, batch, precision, domain, input_values, output_values)
-
-    return None
+    nreal = 1
+    for d in [nx, ny, nz]:
+        if d > 0:
+            nreal *= d
+    nreal *= batch
+    input_values = [complex(random.random(), random.random()) for _ in range(nreal)]
+    output_values = [0j] * nreal
+    return write_fft_matrix_file_from_arrays(
+        nx, ny, nz, batch, precision, domain, input_values, output_values
+    ), False
 
 
 def run_gemm_warmup(cmd, timeout, warmup_runs, matrix_file=None):
@@ -744,8 +814,10 @@ def run_single_case(
     seed,
     bank_path,
     bank_profile,
+    databank_dir=None,
+    databank_max_n=None,
 ):
-    matrix_file = generate_gemm_matrix_file(
+    matrix_file, _gemm_file_is_persistent = generate_gemm_matrix_file(
         m,
         n,
         k,
@@ -753,6 +825,8 @@ def run_single_case(
         seed=seed,
         bank_path=bank_path,
         bank_profile=bank_profile,
+        databank_dir=databank_dir,
+        databank_max_n=databank_max_n,
     )
 
     try:
@@ -882,7 +956,8 @@ def run_single_case(
             "Wall_Elapsed_sec": end_wall - start_wall,
         }
     finally:
-        if os.path.exists(matrix_file):
+        # Solo eliminar el archivo si es temporal (no proviene del DataBankManager).
+        if not _gemm_file_is_persistent and os.path.exists(matrix_file):
             os.unlink(matrix_file)
 
 
@@ -1186,6 +1261,8 @@ def run_gemm(args):
                             args.seed if args.seed else None,
                             args.benchmark_bank,
                             args.gemm_profile,
+                            databank_dir=args.databank_dir,
+                            databank_max_n=args.databank_max_n,
                         )
 
                         # Include Device in the written row
@@ -1276,7 +1353,7 @@ def run_fft(args):
                 for device in devices:
                     done += 1
                     binary = args.fft_binary_gpu if device == "gpu" else args.fft_binary_cpu
-                    matrix_file = generate_fft_matrix_file(
+                    matrix_file, _fft_file_is_persistent = generate_fft_matrix_file(
                         nx,
                         ny,
                         nz,
@@ -1287,6 +1364,8 @@ def run_fft(args):
                         seed=args.seed,
                         bank_path=args.benchmark_bank,
                         bank_profile=args.fft_profile,
+                        databank_dir=args.databank_dir,
+                        databank_max_n=args.databank_max_n,
                     )
                     
                     try:
@@ -1325,7 +1404,8 @@ def run_fft(args):
                             matrix_file,
                         )
                     finally:
-                        if matrix_file and os.path.exists(matrix_file):
+                        # Solo eliminar si es temporal (no del DataBankManager).
+                        if matrix_file and not _fft_file_is_persistent and os.path.exists(matrix_file):
                             os.unlink(matrix_file)
 
                     writer.writerow({key: result[key] for key in fieldnames})
@@ -1418,17 +1498,28 @@ def main():
     parser.add_argument(
         "--benchmark-bank",
         default=DEFAULT_BENCHMARK_BANK,
-        help="Ruta al banco HDF5 de entradas benchmark",
+        help="Ruta al banco HDF5 legacy (fallback si DataBankManager falla)",
     )
     parser.add_argument(
         "--gemm-profile",
         default="dense_normal",
-        help="Perfil GEMM dentro del banco HDF5",
+        help="Perfil de generacion de datos (dense_normal, dense_uniform, ill_conditioned)",
     )
     parser.add_argument(
         "--fft-profile",
         default="broadband",
-        help="Perfil FFT dentro del banco HDF5",
+        help="Perfil de generacion de datos FFT (broadband, single_tone, multi_tone)",
+    )
+    parser.add_argument(
+        "--databank-dir",
+        default=DEFAULT_DATABANK_DIR,
+        help="Raiz del banco de datos binario (DataBankManager)",
+    )
+    parser.add_argument(
+        "--databank-max-n",
+        type=int,
+        default=DEFAULT_DATABANK_MAX_N,
+        help="Techo de N para el rango compute-intensive del banco binario",
     )
     parser.add_argument(
         "--gemm-warmup",
