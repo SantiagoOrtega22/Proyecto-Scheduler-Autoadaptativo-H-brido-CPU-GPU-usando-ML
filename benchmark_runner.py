@@ -661,7 +661,9 @@ def generate_gemm_matrix_file(
         mgr = DataBankManager(base_dir=db_dir, max_n=db_max)
         path = mgr.get_gemm_path(m, n, k, precision, profile=bank_profile)
         return path, True
-    except Exception:
+    except Exception as e:
+        import sys
+        print(f"\n[DEBUG] Error en DataBankManager: {type(e).__name__} - {e}\n", file=sys.stderr)
         pass  # Fallback al banco HDF5 o generación aleatoria
 
     # ── Fallback 1: banco HDF5 legacy (solo S/D cuadradas) ───────────────────
