@@ -12,6 +12,7 @@ bench_files/databank/
 # Resultados de los benchmarks
 *.csv
 *.txt
+*.png
 
 # Python
 __pycache__/

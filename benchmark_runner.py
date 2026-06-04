@@ -1375,23 +1375,6 @@ def run_fft(args):
                     )
                     
                     try:
-                        if args.fft_warmup > 0:
-                            run_fft_warmup(
-                                binary,
-                                nx,
-                                ny,
-                                nz,
-                                batch,
-                                precision,
-                                domain,
-                                direction,
-                                layout,
-                                args.fft_plan,
-                                args.fft_warmup,
-                                args.timeout,
-                                matrix_file,
-                            )
-                        
                         for rep in range(args.repetitions):
                             done += 1
                             result = run_single_case_fft(
@@ -1407,7 +1390,7 @@ def run_fft(args):
                                 direction,
                                 layout,
                                 args.fft_plan,
-                                0,  # Warmup is 0 here since it was already done before the loop
+                                args.fft_warmup,
                                 args.fft_iters,
                                 args.timeout,
                                 matrix_file,

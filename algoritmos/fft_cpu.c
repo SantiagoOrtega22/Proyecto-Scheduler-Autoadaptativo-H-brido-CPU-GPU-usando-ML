@@ -640,7 +640,11 @@ static void benchmark_fft_float(const FftConfig *cfg) {
             if (out && cfg->layout != 'I') fftwf_free(out);
             return;
         }
-        fill_complex_float(in, total_real);
+        if (g_fft_loaded_from_file && g_fft_input_c32 != NULL) {
+            memcpy(in, g_fft_input_c32, sizeof(fftwf_complex) * total_real);
+        } else {
+            fill_complex_float(in, total_real);
+        }
 
         plan = fftwf_plan_many_dft(rank, dims, cfg->batch,
                                    in, NULL, 1, (int)nreal,
@@ -720,7 +724,11 @@ static void benchmark_fft_float(const FftConfig *cfg) {
             return;
         }
         if (g_fft_loaded_from_file && g_fft_input_f32 != NULL) {
-            // Data already loaded from file (would be from line above)
+            size_t logical_count = total_real;
+            memcpy(in, g_fft_input_f32, sizeof(float) * logical_count);
+            if (cfg->layout == 'I' && total_real_inplace > logical_count) {
+                memset(in + logical_count, 0, sizeof(float) * (total_real_inplace - logical_count));
+            }
         } else {
             fill_real_float(in, total_real);
             if (cfg->layout == 'I' && total_real_inplace > total_real) {
@@ -800,7 +808,11 @@ static void benchmark_fft_float(const FftConfig *cfg) {
             out = (float *)fftwf_malloc(sizeof(float) * total_real);
         }
 
-        fill_complex_float(in, cfg->layout == 'I' ? total_complex : total_complex);
+        if (g_fft_loaded_from_file && g_fft_input_c32 != NULL) {
+            memcpy(in, g_fft_input_c32, sizeof(fftwf_complex) * total_complex);
+        } else {
+            fill_complex_float(in, total_complex);
+        }
 
         plan = fftwf_plan_many_dft_c2r(rank, dims, cfg->batch,
                                        in, inembed_ptr, 1, idist,
