@@ -22,8 +22,18 @@
 #include <string.h>
 #include <ctype.h>
 #include <math.h>
+#include <time.h>
 #include <cuda_runtime.h>
 #include <cufft.h>
+
+/**
+ * Retrieves the current monotonic system time in seconds.
+ */
+static double monotonic_time_sec(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
 
 /**
  * @brief Macro to check CUDA runtime API errors.
@@ -432,16 +442,18 @@ static void benchmark_fft_float(const FftConfig *cfg) {
                               onembed_ptr, 1, odist,
                               type, cfg->batch));
 
-    cudaEvent_t start, stop;
-    CHECK_CUDA(cudaEventCreate(&start));
-    CHECK_CUDA(cudaEventCreate(&stop));
-
     if (strcmp(cfg->domain, "C2C") == 0) {
         cufftComplex *h_in = (cufftComplex *)malloc(sizeof(cufftComplex) * total_real);
         if (g_fft_loaded_from_file && g_fft_input_c32 != NULL) {
             memcpy(h_in, g_fft_input_c32, sizeof(cufftComplex) * total_real);
         } else {
             fill_complex_float(h_in, total_real);
+        }
+
+        cufftComplex *h_out = (cufftComplex *)malloc(sizeof(cufftComplex) * total_real);
+        if (!h_out) {
+            fprintf(stderr, "Error allocating host output memory\n");
+            exit(1);
         }
 
         cufftComplex *d_in = NULL;
@@ -455,44 +467,39 @@ static void benchmark_fft_float(const FftConfig *cfg) {
             CHECK_CUDA(cudaMalloc(&d_out, sizeof(cufftComplex) * total_real));
         }
 
-        CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftComplex) * total_real, cudaMemcpyHostToDevice));
-
-        // HPC Rigor: Warm-up phase to stabilize GPU clock speeds
+        // HPC Rigor: Warm-up phase
         for (int i = 0; i < warmup; ++i) {
+            CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftComplex) * total_real, cudaMemcpyHostToDevice));
             CHECK_CUFFT(cufftExecC2C(plan, d_in, d_out, dir));
+            CHECK_CUDA(cudaDeviceSynchronize());
+            CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(cufftComplex) * total_real, cudaMemcpyDeviceToHost));
         }
-        // HPC Rigor: Explicit synchronization before timing to isolate measurements
         CHECK_CUDA(cudaDeviceSynchronize());
 
         if (iters == 0) {
             print_result(cfg, 0.0, 0.0);
         } else {
-            CHECK_CUDA(cudaEventRecord(start));
+            double start_time = monotonic_time_sec();
             for (int i = 0; i < iters; ++i) {
+                CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftComplex) * total_real, cudaMemcpyHostToDevice));
                 CHECK_CUFFT(cufftExecC2C(plan, d_in, d_out, dir));
+                CHECK_CUDA(cudaDeviceSynchronize());
+                CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(cufftComplex) * total_real, cudaMemcpyDeviceToHost));
             }
-            CHECK_CUDA(cudaEventRecord(stop));
-            // HPC Rigor: Sync using events to accurately capture asynchronous kernel completion
-            CHECK_CUDA(cudaEventSynchronize(stop));
-
-            float ms = 0.0f;
-            CHECK_CUDA(cudaEventElapsedTime(&ms, start, stop));
-            ms /= iters;
-            double time_sec = (double)ms / 1e3;
+            double end_time = monotonic_time_sec();
+            double time_sec = (end_time - start_time) / (double)iters;
             double gflops = flops / (time_sec * 1e9);
 
             print_result(cfg, time_sec, gflops);
         }
 
-        // HPC Rigor: Free allocations to avoid GPU Out Of Memory (OOM) across sweeping parameters
         cufftDestroy(plan);
         cudaFree(d_in);
         if (cfg->layout != 'I') {
             cudaFree(d_out);
         }
         free(h_in);
-        cudaEventDestroy(start);
-        cudaEventDestroy(stop);
+        free(h_out);
         return;
     }
 
@@ -511,6 +518,12 @@ static void benchmark_fft_float(const FftConfig *cfg) {
             }
         }
 
+        cufftComplex *h_out = (cufftComplex *)malloc(sizeof(cufftComplex) * total_complex);
+        if (!h_out) {
+            fprintf(stderr, "Error allocating host output memory\n");
+            exit(1);
+        }
+
         float *d_in = NULL;
         cufftComplex *d_out = NULL;
 
@@ -522,44 +535,39 @@ static void benchmark_fft_float(const FftConfig *cfg) {
             CHECK_CUDA(cudaMalloc(&d_out, sizeof(cufftComplex) * total_complex));
         }
 
-        CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(float) * total_real, cudaMemcpyHostToDevice));
-
-        // HPC Rigor: Warm-up phase to stabilize GPU clock speeds
+        // HPC Rigor: Warm-up phase
         for (int i = 0; i < warmup; ++i) {
+            CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(float) * total_real, cudaMemcpyHostToDevice));
             CHECK_CUFFT(cufftExecR2C(plan, d_in, d_out));
+            CHECK_CUDA(cudaDeviceSynchronize());
+            CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(cufftComplex) * total_complex, cudaMemcpyDeviceToHost));
         }
-        // HPC Rigor: Explicit synchronization before timing to isolate measurements
         CHECK_CUDA(cudaDeviceSynchronize());
 
         if (iters == 0) {
             print_result(cfg, 0.0, 0.0);
         } else {
-            CHECK_CUDA(cudaEventRecord(start));
+            double start_time = monotonic_time_sec();
             for (int i = 0; i < iters; ++i) {
+                CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(float) * total_real, cudaMemcpyHostToDevice));
                 CHECK_CUFFT(cufftExecR2C(plan, d_in, d_out));
+                CHECK_CUDA(cudaDeviceSynchronize());
+                CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(cufftComplex) * total_complex, cudaMemcpyDeviceToHost));
             }
-            CHECK_CUDA(cudaEventRecord(stop));
-            // HPC Rigor: Sync using events to accurately capture asynchronous kernel completion
-            CHECK_CUDA(cudaEventSynchronize(stop));
-
-            float ms = 0.0f;
-            CHECK_CUDA(cudaEventElapsedTime(&ms, start, stop));
-            ms /= iters;
-            double time_sec = (double)ms / 1e3;
+            double end_time = monotonic_time_sec();
+            double time_sec = (end_time - start_time) / (double)iters;
             double gflops = flops / (time_sec * 1e9);
 
             print_result(cfg, time_sec, gflops);
         }
 
-        // HPC Rigor: Free allocations to avoid GPU Out Of Memory (OOM) across sweeping parameters
         cufftDestroy(plan);
         cudaFree(d_in);
         if (cfg->layout != 'I') {
             cudaFree(d_out);
         }
         free(h_in);
-        cudaEventDestroy(start);
-        cudaEventDestroy(stop);
+        free(h_out);
         return;
     }
 
@@ -574,6 +582,12 @@ static void benchmark_fft_float(const FftConfig *cfg) {
             fill_complex_float(h_in, total_complex);
         }
 
+        float *h_out = (float *)malloc(sizeof(float) * total_real);
+        if (!h_out) {
+            fprintf(stderr, "Error allocating host output memory\n");
+            exit(1);
+        }
+
         cufftComplex *d_in = NULL;
         float *d_out = NULL;
 
@@ -585,36 +599,32 @@ static void benchmark_fft_float(const FftConfig *cfg) {
             CHECK_CUDA(cudaMalloc(&d_out, sizeof(float) * total_real));
         }
 
-        CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftComplex) * total_complex, cudaMemcpyHostToDevice));
-
-        // HPC Rigor: Warm-up phase to stabilize GPU clock speeds
+        // HPC Rigor: Warm-up phase
         for (int i = 0; i < warmup; ++i) {
+            CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftComplex) * total_complex, cudaMemcpyHostToDevice));
             CHECK_CUFFT(cufftExecC2R(plan, d_in, d_out));
+            CHECK_CUDA(cudaDeviceSynchronize());
+            CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(float) * total_real, cudaMemcpyDeviceToHost));
         }
-        // HPC Rigor: Explicit synchronization before timing to isolate measurements
         CHECK_CUDA(cudaDeviceSynchronize());
 
         if (iters == 0) {
             print_result(cfg, 0.0, 0.0);
         } else {
-            CHECK_CUDA(cudaEventRecord(start));
+            double start_time = monotonic_time_sec();
             for (int i = 0; i < iters; ++i) {
+                CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftComplex) * total_complex, cudaMemcpyHostToDevice));
                 CHECK_CUFFT(cufftExecC2R(plan, d_in, d_out));
+                CHECK_CUDA(cudaDeviceSynchronize());
+                CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(float) * total_real, cudaMemcpyDeviceToHost));
             }
-            CHECK_CUDA(cudaEventRecord(stop));
-            // HPC Rigor: Sync using events to accurately capture asynchronous kernel completion
-            CHECK_CUDA(cudaEventSynchronize(stop));
-
-            float ms = 0.0f;
-            CHECK_CUDA(cudaEventElapsedTime(&ms, start, stop));
-            ms /= iters;
-            double time_sec = (double)ms / 1e3;
+            double end_time = monotonic_time_sec();
+            double time_sec = (end_time - start_time) / (double)iters;
             double gflops = flops / (time_sec * 1e9);
 
             print_result(cfg, time_sec, gflops);
         }
 
-        // HPC Rigor: Free allocations to avoid GPU Out Of Memory (OOM) across sweeping parameters
         cufftDestroy(plan);
         if (cfg->layout == 'I') {
             cudaFree(d_out);
@@ -623,8 +633,7 @@ static void benchmark_fft_float(const FftConfig *cfg) {
             cudaFree(d_out);
         }
         free(h_in);
-        cudaEventDestroy(start);
-        cudaEventDestroy(stop);
+        free(h_out);
         return;
     }
 }
@@ -706,16 +715,18 @@ static void benchmark_fft_double(const FftConfig *cfg) {
                               onembed_ptr, 1, odist,
                               type, cfg->batch));
 
-    cudaEvent_t start, stop;
-    CHECK_CUDA(cudaEventCreate(&start));
-    CHECK_CUDA(cudaEventCreate(&stop));
-
     if (strcmp(cfg->domain, "C2C") == 0) {
         cufftDoubleComplex *h_in = (cufftDoubleComplex *)malloc(sizeof(cufftDoubleComplex) * total_real);
         if (g_fft_loaded_from_file && g_fft_input_c64 != NULL) {
             memcpy(h_in, g_fft_input_c64, sizeof(cufftDoubleComplex) * total_real);
         } else {
             fill_complex_double(h_in, total_real);
+        }
+
+        cufftDoubleComplex *h_out = (cufftDoubleComplex *)malloc(sizeof(cufftDoubleComplex) * total_real);
+        if (!h_out) {
+            fprintf(stderr, "Error allocating host output memory\n");
+            exit(1);
         }
 
         cufftDoubleComplex *d_in = NULL;
@@ -729,44 +740,39 @@ static void benchmark_fft_double(const FftConfig *cfg) {
             CHECK_CUDA(cudaMalloc(&d_out, sizeof(cufftDoubleComplex) * total_real));
         }
 
-        CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftDoubleComplex) * total_real, cudaMemcpyHostToDevice));
-
-        // HPC Rigor: Warm-up phase to stabilize GPU clock speeds
+        // HPC Rigor: Warm-up phase
         for (int i = 0; i < warmup; ++i) {
+            CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftDoubleComplex) * total_real, cudaMemcpyHostToDevice));
             CHECK_CUFFT(cufftExecZ2Z(plan, d_in, d_out, dir));
+            CHECK_CUDA(cudaDeviceSynchronize());
+            CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(cufftDoubleComplex) * total_real, cudaMemcpyDeviceToHost));
         }
-        // HPC Rigor: Explicit synchronization before timing to isolate measurements
         CHECK_CUDA(cudaDeviceSynchronize());
 
         if (iters == 0) {
             print_result(cfg, 0.0, 0.0);
         } else {
-            CHECK_CUDA(cudaEventRecord(start));
+            double start_time = monotonic_time_sec();
             for (int i = 0; i < iters; ++i) {
+                CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftDoubleComplex) * total_real, cudaMemcpyHostToDevice));
                 CHECK_CUFFT(cufftExecZ2Z(plan, d_in, d_out, dir));
+                CHECK_CUDA(cudaDeviceSynchronize());
+                CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(cufftDoubleComplex) * total_real, cudaMemcpyDeviceToHost));
             }
-            CHECK_CUDA(cudaEventRecord(stop));
-            // HPC Rigor: Sync using events to accurately capture asynchronous kernel completion
-            CHECK_CUDA(cudaEventSynchronize(stop));
-
-            float ms = 0.0f;
-            CHECK_CUDA(cudaEventElapsedTime(&ms, start, stop));
-            ms /= iters;
-            double time_sec = (double)ms / 1e3;
+            double end_time = monotonic_time_sec();
+            double time_sec = (end_time - start_time) / (double)iters;
             double gflops = flops / (time_sec * 1e9);
 
             print_result(cfg, time_sec, gflops);
         }
 
-        // HPC Rigor: Free allocations to avoid GPU Out Of Memory (OOM) across sweeping parameters
         cufftDestroy(plan);
         cudaFree(d_in);
         if (cfg->layout != 'I') {
             cudaFree(d_out);
         }
         free(h_in);
-        cudaEventDestroy(start);
-        cudaEventDestroy(stop);
+        free(h_out);
         return;
     }
 
@@ -785,6 +791,12 @@ static void benchmark_fft_double(const FftConfig *cfg) {
             }
         }
 
+        cufftDoubleComplex *h_out = (cufftDoubleComplex *)malloc(sizeof(cufftDoubleComplex) * total_complex);
+        if (!h_out) {
+            fprintf(stderr, "Error allocating host output memory\n");
+            exit(1);
+        }
+
         double *d_in = NULL;
         cufftDoubleComplex *d_out = NULL;
 
@@ -796,44 +808,39 @@ static void benchmark_fft_double(const FftConfig *cfg) {
             CHECK_CUDA(cudaMalloc(&d_out, sizeof(cufftDoubleComplex) * total_complex));
         }
 
-        CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(double) * total_real, cudaMemcpyHostToDevice));
-
-        // HPC Rigor: Warm-up phase to stabilize GPU clock speeds
+        // HPC Rigor: Warm-up phase
         for (int i = 0; i < warmup; ++i) {
+            CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(double) * total_real, cudaMemcpyHostToDevice));
             CHECK_CUFFT(cufftExecD2Z(plan, d_in, d_out));
+            CHECK_CUDA(cudaDeviceSynchronize());
+            CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(cufftDoubleComplex) * total_complex, cudaMemcpyDeviceToHost));
         }
-        // HPC Rigor: Explicit synchronization before timing to isolate measurements
         CHECK_CUDA(cudaDeviceSynchronize());
 
         if (iters == 0) {
             print_result(cfg, 0.0, 0.0);
         } else {
-            CHECK_CUDA(cudaEventRecord(start));
+            double start_time = monotonic_time_sec();
             for (int i = 0; i < iters; ++i) {
+                CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(double) * total_real, cudaMemcpyHostToDevice));
                 CHECK_CUFFT(cufftExecD2Z(plan, d_in, d_out));
+                CHECK_CUDA(cudaDeviceSynchronize());
+                CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(cufftDoubleComplex) * total_complex, cudaMemcpyDeviceToHost));
             }
-            CHECK_CUDA(cudaEventRecord(stop));
-            // HPC Rigor: Sync using events to accurately capture asynchronous kernel completion
-            CHECK_CUDA(cudaEventSynchronize(stop));
-
-            float ms = 0.0f;
-            CHECK_CUDA(cudaEventElapsedTime(&ms, start, stop));
-            ms /= iters;
-            double time_sec = (double)ms / 1e3;
+            double end_time = monotonic_time_sec();
+            double time_sec = (end_time - start_time) / (double)iters;
             double gflops = flops / (time_sec * 1e9);
 
             print_result(cfg, time_sec, gflops);
         }
 
-        // HPC Rigor: Free allocations to avoid GPU Out Of Memory (OOM) across sweeping parameters
         cufftDestroy(plan);
         cudaFree(d_in);
         if (cfg->layout != 'I') {
             cudaFree(d_out);
         }
         free(h_in);
-        cudaEventDestroy(start);
-        cudaEventDestroy(stop);
+        free(h_out);
         return;
     }
 
@@ -848,6 +855,12 @@ static void benchmark_fft_double(const FftConfig *cfg) {
             fill_complex_double(h_in, total_complex);
         }
 
+        double *h_out = (double *)malloc(sizeof(double) * total_real);
+        if (!h_out) {
+            fprintf(stderr, "Error allocating host output memory\n");
+            exit(1);
+        }
+
         cufftDoubleComplex *d_in = NULL;
         double *d_out = NULL;
 
@@ -859,36 +872,32 @@ static void benchmark_fft_double(const FftConfig *cfg) {
             CHECK_CUDA(cudaMalloc(&d_out, sizeof(double) * total_real));
         }
 
-        CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftDoubleComplex) * total_complex, cudaMemcpyHostToDevice));
-
-        // HPC Rigor: Warm-up phase to stabilize GPU clock speeds
+        // HPC Rigor: Warm-up phase
         for (int i = 0; i < warmup; ++i) {
+            CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftDoubleComplex) * total_complex, cudaMemcpyHostToDevice));
             CHECK_CUFFT(cufftExecZ2D(plan, d_in, d_out));
+            CHECK_CUDA(cudaDeviceSynchronize());
+            CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(double) * total_real, cudaMemcpyDeviceToHost));
         }
-        // HPC Rigor: Explicit synchronization before timing to isolate measurements
         CHECK_CUDA(cudaDeviceSynchronize());
 
         if (iters == 0) {
             print_result(cfg, 0.0, 0.0);
         } else {
-            CHECK_CUDA(cudaEventRecord(start));
+            double start_time = monotonic_time_sec();
             for (int i = 0; i < iters; ++i) {
+                CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftDoubleComplex) * total_complex, cudaMemcpyHostToDevice));
                 CHECK_CUFFT(cufftExecZ2D(plan, d_in, d_out));
+                CHECK_CUDA(cudaDeviceSynchronize());
+                CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(double) * total_real, cudaMemcpyDeviceToHost));
             }
-            CHECK_CUDA(cudaEventRecord(stop));
-            // HPC Rigor: Sync using events to accurately capture asynchronous kernel completion
-            CHECK_CUDA(cudaEventSynchronize(stop));
-
-            float ms = 0.0f;
-            CHECK_CUDA(cudaEventElapsedTime(&ms, start, stop));
-            ms /= iters;
-            double time_sec = (double)ms / 1e3;
+            double end_time = monotonic_time_sec();
+            double time_sec = (end_time - start_time) / (double)iters;
             double gflops = flops / (time_sec * 1e9);
 
             print_result(cfg, time_sec, gflops);
         }
 
-        // HPC Rigor: Free allocations to avoid GPU Out Of Memory (OOM) across sweeping parameters
         cufftDestroy(plan);
         if (cfg->layout == 'I') {
             cudaFree(d_out);
@@ -897,8 +906,7 @@ static void benchmark_fft_double(const FftConfig *cfg) {
             cudaFree(d_out);
         }
         free(h_in);
-        cudaEventDestroy(start);
-        cudaEventDestroy(stop);
+        free(h_out);
         return;
     }
 }

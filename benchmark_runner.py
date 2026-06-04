@@ -940,7 +940,7 @@ def run_single_case(
             ops = 2.0 * m * n * k
 
         gflops = (ops / time_sec) / 1e9
-        edp = energy_j * power_window_sec
+        edp = energy_j * time_sec
 
         return {
             "M": m,
@@ -1224,6 +1224,7 @@ def run_gemm(args):
             "Precision",
             "OpA",
             "OpB",
+            "Iteration",
             "Time_sec",
             "GFLOPS",
             "Avg_Power_W",
@@ -1236,7 +1237,7 @@ def run_gemm(args):
         else:
             dim_cases = [(s, s, s) for s in sizes]
 
-        total = len(dim_cases) * len(precisions) * len(op_a_list) * len(op_b_list) * len(devices)
+        total = len(dim_cases) * len(precisions) * len(op_a_list) * len(op_b_list) * len(devices) * args.repetitions
         done = 0
 
         with open(output_path, "w", newline="", encoding="utf-8") as f:
@@ -1246,39 +1247,42 @@ def run_gemm(args):
             for m, n, k in dim_cases:
                 for precision, op_a, op_b in itertools.product(precisions, op_a_list, op_b_list):
                     for device in devices:
-                        done += 1
                         binary = args.gemm_binary_gpu if device == "gpu" else args.gemm_binary_cpu
-                        result = run_single_case(
-                            binary,
-                            device,
-                            args.gpu_index,
-                            m,
-                            n,
-                            k,
-                            precision,
-                            op_a,
-                            op_b,
-                            args.timeout,
-                            args.gemm_warmup,
-                            args.seed if args.seed else None,
-                            args.benchmark_bank,
-                            args.gemm_profile,
-                            databank_dir=args.databank_dir,
-                            databank_max_n=args.databank_max_n,
-                        )
+                        for rep in range(args.repetitions):
+                            done += 1
+                            warmup_runs = args.gemm_warmup if rep == 0 else 0
+                            result = run_single_case(
+                                binary,
+                                device,
+                                args.gpu_index,
+                                m,
+                                n,
+                                k,
+                                precision,
+                                op_a,
+                                op_b,
+                                args.timeout,
+                                warmup_runs,
+                                args.seed if args.seed else None,
+                                args.benchmark_bank,
+                                args.gemm_profile,
+                                databank_dir=args.databank_dir,
+                                databank_max_n=args.databank_max_n,
+                            )
 
-                        # Include Device in the written row
-                        row = {key: result[key] for key in fieldnames if key != "Device"}
-                        row["Device"] = device
-                        writer.writerow(row)
-                        f.flush()
+                            # Include Device and Iteration in the written row
+                            row = {key: result.get(key, 0.0) for key in fieldnames if key not in ["Device", "Iteration"]}
+                            row["Device"] = device
+                            row["Iteration"] = rep
+                            writer.writerow(row)
+                            f.flush()
 
-                        print(
-                            f"[{done}/{total}] {device.upper()} M={m} N={n} K={k} P={precision} OpA={op_a} OpB={op_b} "
-                            f"Time={result['Time_sec']:.6f}s GFLOPS={result['GFLOPS']:.3f} "
-                            f"Pavg={result['Avg_Power_W']:.3f}W Energy={result['Energy_J']:.6f}J "
-                            f"EDP={result['EDP']:.9f}"
-                        )
+                            print(
+                                f"[{done}/{total}] {device.upper()} M={m} N={n} K={k} P={precision} OpA={op_a} OpB={op_b} "
+                                f"Rep={rep} Time={result['Time_sec']:.6f}s GFLOPS={result['GFLOPS']:.3f} "
+                                f"Pavg={result['Avg_Power_W']:.3f}W Energy={result['Energy_J']:.6f}J "
+                                f"EDP={result['EDP']:.9f}"
+                            )
 
         print(f"\nResultados guardados en: {output_path}")
     finally:
@@ -1319,6 +1323,7 @@ def run_fft(args):
             "Domain",
             "Direction",
             "Layout",
+            "Iteration",
             "Time_sec",
             "GFLOPS",
             "Avg_Power_W",
@@ -1344,7 +1349,7 @@ def run_fft(args):
                             for layout in layouts:
                                 cases.append((nx, ny, nz, batch, precision, domain, direction, layout))
 
-        total = len(cases) * len(devices)
+        total = len(cases) * len(devices) * args.repetitions
         done = 0
 
         with open(output_path, "w", newline="", encoding="utf-8") as f:
@@ -1353,7 +1358,6 @@ def run_fft(args):
 
             for nx, ny, nz, batch, precision, domain, direction, layout in cases:
                 for device in devices:
-                    done += 1
                     binary = args.fft_binary_gpu if device == "gpu" else args.fft_binary_cpu
                     matrix_file, _fft_file_is_persistent = generate_fft_matrix_file(
                         nx,
@@ -1387,42 +1391,46 @@ def run_fft(args):
                                 args.timeout,
                                 matrix_file,
                             )
-                        result = run_single_case_fft(
-                            binary,
-                            device,
-                            args.gpu_index,
-                            nx,
-                            ny,
-                            nz,
-                            batch,
-                            precision,
-                            domain,
-                            direction,
-                            layout,
-                            args.fft_plan,
-                            args.fft_warmup,
-                            args.fft_iters,
-                            args.timeout,
-                            matrix_file,
-                        )
+                        
+                        for rep in range(args.repetitions):
+                            done += 1
+                            result = run_single_case_fft(
+                                binary,
+                                device,
+                                args.gpu_index,
+                                nx,
+                                ny,
+                                nz,
+                                batch,
+                                precision,
+                                domain,
+                                direction,
+                                layout,
+                                args.fft_plan,
+                                0,  # Warmup is 0 here since it was already done before the loop
+                                args.fft_iters,
+                                args.timeout,
+                                matrix_file,
+                            )
+
+                            row = {key: result.get(key, 0.0) for key in fieldnames if key not in ["Device", "Iteration"]}
+                            row["Device"] = device
+                            row["Iteration"] = rep
+                            writer.writerow(row)
+                            f.flush()
+
+                            print(
+                                f"[{done}/{total}] {device.upper()} Nx={nx} Ny={ny} Nz={nz} Batch={batch} "
+                                f"P={precision} D={domain} Dir={direction} L={layout} Rep={rep} "
+                                f"Time={result['Time_sec']:.6f}s GFLOPS={result['GFLOPS']:.3f} "
+                                f"Pavg={result['Avg_Power_W']:.3f}W Energy={result['Energy_J']:.6f}J "
+                                f"EDP={result['EDP']:.9f}"
+                            )
+
                     finally:
                         # Solo eliminar si es temporal (no del DataBankManager).
                         if matrix_file and not _fft_file_is_persistent and os.path.exists(matrix_file):
                             os.unlink(matrix_file)
-
-                    writer.writerow({key: result[key] for key in fieldnames})
-                    f.flush()
-
-                    print(
-                        f"[{done}/{total}] {device.upper()} Nx={nx} Ny={ny} Nz={nz} Batch={batch} "
-                        f"P={precision} D={domain} Dir={direction} L={layout} "
-                        f"Time={result['Time_sec']:.6f}s GFLOPS={result['GFLOPS']:.3f} "
-                        f"Pavg={result['Avg_Power_W']:.3f}W Energy={result['Energy_J']:.6f}J "
-                        f"EDP={result['EDP']:.9f}"
-                    )
-
-                    if args.cooldown > 0 and done < total:
-                        time.sleep(args.cooldown)
 
         print(f"\nResultados guardados en: {output_path}")
     finally:
@@ -1526,8 +1534,14 @@ def main():
     parser.add_argument(
         "--gemm-warmup",
         type=int,
-        default=1,
+        default=4,
         help="Ejecuciones de warmup previas a GEMM",
+    )
+    parser.add_argument(
+        "--repetitions",
+        type=int,
+        default=1,
+        help="Numero de repeticiones continuas de cada caso de prueba (para analisis estadistico)",
     )
 
     parser.add_argument(
@@ -1595,16 +1609,9 @@ def main():
     parser.add_argument(
         "--fft-iters",
         type=int,
-        default=10,
+        default=1,
         help="Iteraciones medidas FFT",
     )
-    parser.add_argument(
-        "--cooldown",
-        type=float,
-        default=1.0,
-        help="Pausa en segundos entre ejecuciones secuenciales (FFT)",
-    )
-
     args = parser.parse_args()
 
     # Compatibilidad: --binary sobreescribe --gemm-binary-gpu
