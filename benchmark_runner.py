@@ -812,7 +812,7 @@ def run_single_case(
     op_a,
     op_b,
     timeout,
-    warmup_runs,
+    is_warmup,
     seed,
     bank_path,
     bank_profile,
@@ -832,11 +832,36 @@ def run_single_case(
     )
 
     try:
-        cmd = [binary, str(m), str(n), str(k), precision, op_a, op_b, matrix_file]
+        # Build binary execution command using CLI flags (allows specifying --warmup 0 --iters 1)
+        cmd = [
+            binary,
+            "--m", str(m),
+            "--n", str(n),
+            "--k", str(k),
+            "--precision", precision,
+            "--op-a", op_a,
+            "--op-b", op_b,
+            "--source", matrix_file,
+            "--warmup", "0",
+            "--iters", "1"
+        ]
 
-        # 1. Warmups
-        if warmup_runs > 0:
-            run_gemm_warmup(cmd, timeout, warmup_runs, matrix_file)
+        if is_warmup:
+            # 1. Warmup Run: Execute the binary once with 0 warmups, 1 iter, and no telemetry
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    "Fallo en warmup GEMM para "
+                    f"M={m}, N={n}, K={k}, P={precision}, OpA={op_a}, OpB={op_b}.\n"
+                    f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+                )
+            return {}
 
         # 2. Metric Isolation Execution (Solo Tiempo)
         proc_iso = subprocess.run(
@@ -976,11 +1001,12 @@ def run_single_case_fft(
     direction,
     layout,
     plan,
-    warmup,
-    iters,
+    is_warmup,
     timeout,
     matrix_file,
 ):
+    # Construct binary execution command using positional arguments:
+    # Nx Ny Nz Batch Precision Domain Direction Layout Warmup Iters Plan [matrix_file]
     cmd = [
         binary,
         str(nx),
@@ -991,17 +1017,34 @@ def run_single_case_fft(
         domain,
         direction,
         layout,
+        "0",  # warmup_runs = 0
+        "1",  # iters = 1
     ]
-    if warmup is not None:
-        cmd.append(str(warmup))
-    if iters is not None:
-        cmd.append(str(iters))
     if plan is not None:
         cmd.append(plan)
+    else:
+        cmd.append("E")
     if matrix_file:
         cmd.append(matrix_file)
 
-    # 1. Metric Isolation Execution (Solo Tiempo)
+    if is_warmup:
+        # 1. Warmup Run: Execute the binary once with 0 warmups, 1 iter, and no telemetry
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                "Fallo en warmup FFT para "
+                f"Nx={nx}, Ny={ny}, Nz={nz}, Batch={batch}, P={precision}, D={domain}, Dir={direction}, L={layout}.\n"
+                f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+            )
+        return {}
+
+    # 2. Metric Isolation Execution (Solo Tiempo)
     proc_iso = subprocess.run(
         cmd,
         capture_output=True,
@@ -1029,7 +1072,7 @@ def run_single_case_fft(
     else:
         time_sec = float(match.group(2)) / 1e3
 
-    # 2. Power Monitoring Execution (Segunda ejecucion con monitor activo)
+    # 3. Power Monitoring Execution (Segunda ejecucion con monitor activo)
     power_queue = queue.Queue(maxsize=1)
     stop_event = threading.Event()
 
@@ -1084,12 +1127,10 @@ def run_single_case_fft(
     power_window_sec = wall_time
 
     if device == "gpu":
-        # En GPU integramos las muestras NVML para obtener energia y potencia media.
         avg_power_w, energy_j = average_and_energy_from_samples(samples)
         if samples:
             power_window_sec = samples[-1][0] - samples[0][0]
     else:
-        # Para CPU, la energia proviene de RAPL (energy_uj). Usamos el tiempo entre lecturas.
         if len(samples) >= 2:
             e0 = samples[0][1]
             e1 = samples[1][1]
@@ -1250,25 +1291,72 @@ def run_gemm(args):
                         binary = args.gemm_binary_gpu if device == "gpu" else args.gemm_binary_cpu
                         for rep in range(args.repetitions):
                             done += 1
-                            warmup_runs = args.gemm_warmup if rep == 0 else 0
-                            result = run_single_case(
-                                binary,
-                                device,
-                                args.gpu_index,
-                                m,
-                                n,
-                                k,
-                                precision,
-                                op_a,
-                                op_b,
-                                args.timeout,
-                                warmup_runs,
-                                args.seed if args.seed else None,
-                                args.benchmark_bank,
-                                args.gemm_profile,
-                                databank_dir=args.databank_dir,
-                                databank_max_n=args.databank_max_n,
-                            )
+                            
+                            # 1. Warm-ups (Python-controlled flat loop)
+                            # Only execute warmups on the first repetition if not explicitly requested on CLI
+                            if args.is_warmup:
+                                # If called via CLI with --is-warmup, only execute 1 warmup call and proceed/skip measurement
+                                run_single_case(
+                                    binary,
+                                    device,
+                                    args.gpu_index,
+                                    m,
+                                    n,
+                                    k,
+                                    precision,
+                                    op_a,
+                                    op_b,
+                                    args.timeout,
+                                    True, # is_warmup
+                                    args.seed if args.seed else None,
+                                    args.benchmark_bank,
+                                    args.gemm_profile,
+                                    databank_dir=args.databank_dir,
+                                    databank_max_n=args.databank_max_n,
+                                )
+                                print(f"[{done}/{total}] {device.upper()} M={m} N={n} K={k} P={precision} OpA={op_a} OpB={op_b} Rep={rep} [WARMUP ONLY]")
+                                continue
+                            else:
+                                warmup_count = args.gemm_warmup if rep == 0 else 0
+                                for _ in range(warmup_count):
+                                    run_single_case(
+                                        binary,
+                                        device,
+                                        args.gpu_index,
+                                        m,
+                                        n,
+                                        k,
+                                        precision,
+                                        op_a,
+                                        op_b,
+                                        args.timeout,
+                                        True, # is_warmup
+                                        args.seed if args.seed else None,
+                                        args.benchmark_bank,
+                                        args.gemm_profile,
+                                        databank_dir=args.databank_dir,
+                                        databank_max_n=args.databank_max_n,
+                                    )
+
+                                # 2. Measurement (is_warmup = False)
+                                result = run_single_case(
+                                    binary,
+                                    device,
+                                    args.gpu_index,
+                                    m,
+                                    n,
+                                    k,
+                                    precision,
+                                    op_a,
+                                    op_b,
+                                    args.timeout,
+                                    False, # is_warmup
+                                    args.seed if args.seed else None,
+                                    args.benchmark_bank,
+                                    args.gemm_profile,
+                                    databank_dir=args.databank_dir,
+                                    databank_max_n=args.databank_max_n,
+                                )
 
                             # Include Device and Iteration in the written row
                             row = {key: result.get(key, 0.0) for key in fieldnames if key not in ["Device", "Iteration"]}
@@ -1377,24 +1465,69 @@ def run_fft(args):
                     try:
                         for rep in range(args.repetitions):
                             done += 1
-                            result = run_single_case_fft(
-                                binary,
-                                device,
-                                args.gpu_index,
-                                nx,
-                                ny,
-                                nz,
-                                batch,
-                                precision,
-                                domain,
-                                direction,
-                                layout,
-                                args.fft_plan,
-                                args.fft_warmup,
-                                args.fft_iters,
-                                args.timeout,
-                                matrix_file,
-                            )
+                            
+                            # 1. Warm-ups (Python-controlled flat loop)
+                            # Only execute warmups on the first repetition if not explicitly requested on CLI
+                            if args.is_warmup:
+                                # If called via CLI with --is-warmup, only execute 1 warmup call and proceed/skip measurement
+                                run_single_case_fft(
+                                    binary,
+                                    device,
+                                    args.gpu_index,
+                                    nx,
+                                    ny,
+                                    nz,
+                                    batch,
+                                    precision,
+                                    domain,
+                                    direction,
+                                    layout,
+                                    args.fft_plan,
+                                    True, # is_warmup
+                                    args.timeout,
+                                    matrix_file,
+                                )
+                                print(f"[{done}/{total}] {device.upper()} Nx={nx} Ny={ny} Nz={nz} Batch={batch} P={precision} D={domain} Dir={direction} L={layout} Rep={rep} [WARMUP ONLY]")
+                                continue
+                            else:
+                                warmup_count = args.fft_warmup if rep == 0 else 0
+                                for _ in range(warmup_count):
+                                    run_single_case_fft(
+                                        binary,
+                                        device,
+                                        args.gpu_index,
+                                        nx,
+                                        ny,
+                                        nz,
+                                        batch,
+                                        precision,
+                                        domain,
+                                        direction,
+                                        layout,
+                                        args.fft_plan,
+                                        True, # is_warmup
+                                        args.timeout,
+                                        matrix_file,
+                                    )
+
+                                # 2. Measurement (is_warmup = False)
+                                result = run_single_case_fft(
+                                    binary,
+                                    device,
+                                    args.gpu_index,
+                                    nx,
+                                    ny,
+                                    nz,
+                                    batch,
+                                    precision,
+                                    domain,
+                                    direction,
+                                    layout,
+                                    args.fft_plan,
+                                    False, # is_warmup
+                                    args.timeout,
+                                    matrix_file,
+                                )
 
                             row = {key: result.get(key, 0.0) for key in fieldnames if key not in ["Device", "Iteration"]}
                             row["Device"] = device
@@ -1519,6 +1652,11 @@ def main():
         type=int,
         default=4,
         help="Ejecuciones de warmup previas a GEMM",
+    )
+    parser.add_argument(
+        "--is-warmup",
+        action="store_true",
+        help="Si se activa, el benchmark solo ejecutara la fase de calentamiento (warmup)",
     )
     parser.add_argument(
         "--repetitions",
