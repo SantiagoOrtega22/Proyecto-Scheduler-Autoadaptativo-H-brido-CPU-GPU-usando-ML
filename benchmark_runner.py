@@ -20,7 +20,11 @@ Barrido GEMM con variaciones de Transpuestas (OpA / OpB):
 
 Modo FFT con barrido estricto 1D (aislado):
     python3 benchmark_runner.py --benchmark fft --device both \
-        --fft-sizes-1d 1024,2048 --fft-sizes-2d " " --fft-sizes-3d " "
+        --fft-sizes-1d 16384,65536,262144,1048576 --fft-sizes-2d " " --fft-sizes-3d " "
+
+Modo FFT con barrido estricto 3D (aislado):
+    python3 benchmark_runner.py --benchmark fft --device both \
+        --fft-sizes-1d " " --fft-sizes-2d " " --fft-sizes-3d 16,16,16,16,16,16,64,64,64,64,64,64,256,256,256,256,256,256,1024,1024,1024,1024,1024,1024
 
 OPCIONES PRINCIPALES
 --------------------
@@ -954,7 +958,10 @@ def run_single_case(
                 e0 = samples[0][1]
                 e1 = samples[1][1]
                 energy_j = max(0.0, e1 - e0)
-                avg_power_w = energy_j / wall_time if wall_time > 0 else 0.0
+                power_window_sec = samples[-1][0] - samples[0][0]
+                if power_window_sec <= 0.0:
+                    power_window_sec = wall_time
+                avg_power_w = energy_j / power_window_sec if power_window_sec > 0 else 0.0
             else:
                 avg_power_w = 0.0
                 energy_j = 0.0
@@ -1141,7 +1148,7 @@ def run_single_case_fft(
             avg_power_w = energy_j / power_window_sec if power_window_sec > 0 else 0.0
 
     dims = fft_dims(nx, ny, nz)
-    ops = fft_flops(dims, domain)
+    ops = fft_flops(dims, domain) * batch
     gflops = (ops / time_sec) / 1e9
     edp = energy_j * time_sec
     payload_bytes = fft_payload_bytes(dims, batch, precision, domain, layout)
