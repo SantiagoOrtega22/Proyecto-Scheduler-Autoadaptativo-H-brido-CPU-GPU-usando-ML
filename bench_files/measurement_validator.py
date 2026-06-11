@@ -439,6 +439,190 @@ class MeasurementValidator:
             print(f"  [Justificación Técnica]: {b['justification']}")
         print("=" * 80)
 
+    def plot_power_vs_n(self, output_path: str = "power_vs_n.png", x_scale: str = "linear") -> None:
+        """Generates a plot of power consumption vs problem size N.
+
+        Groups the data by Device (CPU/GPU) and Precision (S, D, C, Z) if available,
+        plotting individual runs as scatter points and trend lines of the average power.
+
+        Args:
+            output_path (str): File path to save the generated plot.
+            x_scale (str): Scale/layout style of the X-axis. Choices:
+                - "linear": Continuous linear scaling.
+                - "log": Continuous logarithmic scaling.
+                - "categorical": Spreads unique sizes evenly as discrete categories.
+        """
+        if plt is None:
+            print("[!] Matplotlib no está instalado. No se puede generar la gráfica de potencia vs N.", file=sys.stderr)
+            return
+
+        # Auto-detect size column
+        size_col = None
+        for col in ["N", "Nx"]:
+            if col in self.df.columns:
+                size_col = col
+                break
+
+        if not size_col:
+            print("[!] No se encontró columna de tamaño ('N' o 'Nx') en los datos. Cancelando gráfica.", file=sys.stderr)
+            return
+
+        if self.power_col not in self.df.columns:
+            print(f"[!] Columna de potencia '{self.power_col}' no encontrada en los datos. Cancelando gráfica.", file=sys.stderr)
+            return
+
+        # Ensure power and size columns are numeric, and clean the data
+        temp_df = self.df.copy()
+        temp_df[self.power_col] = pd.to_numeric(temp_df[self.power_col], errors='coerce')
+        temp_df[size_col] = pd.to_numeric(temp_df[size_col], errors='coerce')
+
+        # Drop rows with NaN values in size or power columns
+        valid_df = temp_df[temp_df[self.power_col].notna() & temp_df[size_col].notna()]
+        
+        if valid_df.empty:
+            print("[!] No hay mediciones válidas para graficar.", file=sys.stderr)
+            return
+
+        # Use slightly wider figure for categorical scale to display tick labels clearly
+        fig_width = 12 if x_scale == "categorical" else 10
+        plt.figure(figsize=(fig_width, 6))
+
+        # Check grouping columns
+        has_device = "Device" in valid_df.columns
+        has_precision = "Precision" in valid_df.columns
+
+        devices = valid_df["Device"].unique() if has_device else ["default"]
+        
+        # Consistent color palette for devices (CPU = Red/Pinkish, GPU = Blue/Cyan)
+        colors = {
+            "gpu": "#0984e3",  # Blue
+            "cpu": "#d63031",  # Red
+            "default": "#2d3436"  # Dark gray
+        }
+
+        # Style options for precisions to make the plot clean and readable
+        linestyles = {
+            "S": "-",
+            "D": "--",
+            "C": "-.",
+            "Z": ":"
+        }
+        markers = {
+            "S": "o",  # Circle
+            "D": "s",  # Square
+            "C": "^",  # Triangle up
+            "Z": "D"   # Diamond
+        }
+
+        # Compute mapping for categorical scale
+        unique_sizes = sorted(valid_df[size_col].unique())
+        size_to_idx = {size: idx for idx, size in enumerate(unique_sizes)}
+
+        for dev in sorted(devices):
+            dev_df = valid_df[valid_df["Device"] == dev] if has_device else valid_df
+            if dev_df.empty:
+                continue
+
+            color = colors.get(str(dev).lower(), "#6c5ce7")
+            dev_label = str(dev).upper() if has_device else "Total"
+
+            # Check if there are different precisions inside this device group
+            precisions = dev_df["Precision"].unique() if has_precision else ["default"]
+
+            for prec in sorted(precisions):
+                prec_df = dev_df[dev_df["Precision"] == prec] if has_precision else dev_df
+                if prec_df.empty:
+                    continue
+
+                prec_label = f" (Precisión {prec})" if has_precision else ""
+                linestyle = linestyles.get(str(prec).upper(), "-")
+                marker = markers.get(str(prec).upper(), "o")
+
+                if x_scale == "categorical":
+                    x = prec_df[size_col].map(size_to_idx)
+                else:
+                    x = prec_df[size_col]
+                y = prec_df[self.power_col]
+
+                # 1. Scatter plot for individual iterations (capturing noise / variance)
+                plt.scatter(
+                    x, y,
+                    color=color,
+                    alpha=0.35,
+                    edgecolors="none",
+                    s=40,
+                    marker=marker,
+                    label=f"{dev_label}{prec_label} - Mediciones"
+                )
+
+                # 2. Line plot for trend (mean of power per size)
+                grouped = prec_df.groupby(size_col)[self.power_col].mean().reset_index()
+                grouped = grouped.sort_values(by=size_col)
+
+                if x_scale == "categorical":
+                    grouped_x = grouped[size_col].map(size_to_idx)
+                else:
+                    grouped_x = grouped[size_col]
+
+                plt.plot(
+                    grouped_x, grouped[self.power_col],
+                    color=color,
+                    linestyle=linestyle,
+                    linewidth=2.5,
+                    marker=marker,
+                    markersize=6,
+                    label=f"{dev_label}{prec_label} - Promedio"
+                )
+
+        title_suffix = ""
+        if x_scale == "categorical":
+            title_suffix = " (Escala Categórica)"
+        elif x_scale == "log":
+            title_suffix = " (Escala Logarítmica)"
+
+        plt.title(f"Consumo de Potencia Promedio vs Tamaño del Problema (N){title_suffix}", fontsize=14, fontweight="bold", pad=15)
+        
+        if x_scale == "categorical":
+            plt.xlabel(f"Tamaño de Problema ({size_col}) [Índice Categórico]", fontsize=12)
+            plt.xticks(
+                ticks=range(len(unique_sizes)),
+                labels=[str(int(s)) for s in unique_sizes],
+                rotation=45,
+                ha='right'
+            )
+        elif x_scale == "log":
+            plt.xlabel(f"Tamaño de Problema ({size_col}) [Escala Logarítmica]", fontsize=12)
+            # Use base 2 logarithmic scale if sizes are powers of 2
+            is_pow2 = all((int(s) & (int(s) - 1) == 0) and s > 0 for s in unique_sizes if float(s).is_integer())
+            if is_pow2:
+                plt.xscale("log", base=2)
+            else:
+                plt.xscale("log")
+        else:
+            plt.xlabel(f"Tamaño de Problema ({size_col}) [Escala Lineal]", fontsize=12)
+
+        plt.ylabel("Potencia (W)", fontsize=12)
+        plt.grid(True, linestyle="--", alpha=0.5)
+        
+        # Deduplicate legends
+        handles, labels = plt.gca().get_legend_handles_labels()
+        by_label = dict(zip(labels, handles))
+        plt.legend(by_label.values(), by_label.keys(), loc="best", frameon=True, facecolor="white", edgecolor="#dfe6e9")
+
+        # Save to file
+        try:
+            plt.savefig(output_path, dpi=300, bbox_inches="tight")
+            print(f"[*] Gráfico de potencia vs N guardado como '{output_path}'")
+        except Exception as e:
+            print(f"[!] No se pudo guardar la imagen del gráfico de potencia: {e}", file=sys.stderr)
+
+        # Interactive display
+        try:
+            if matplotlib.get_backend() != "Agg":
+                plt.show()
+        except Exception as e:
+            pass
+
 
 def plot_qq_validation(residuos: np.ndarray) -> None:
     """Genera el gráfico Q-Q comparando contra la normal.
@@ -481,6 +665,8 @@ if __name__ == "__main__":
     parser.add_argument("--metric", default="Time_sec", help="Métrica de rendimiento principal a evaluar (default: Time_sec)")
     parser.add_argument("--temp-col", default=None, help="Columna que contiene la temperatura (opcional)")
     parser.add_argument("--plot", action="store_true", help="Generar gráfico Q-Q de los residuos")
+    parser.add_argument("--plot-power", action="store_true", help="Generar gráfico de potencia consumida vs N")
+    parser.add_argument("--x-scale", choices=["linear", "log", "categorical"], default="categorical", help="Escala/diseño del eje X para el gráfico de potencia (linear, log, o categorical)")
     
     args = parser.parse_args()
 
@@ -491,6 +677,9 @@ if __name__ == "__main__":
             temp_col=args.temp_col
         )
         validator.print_validation_report()
+
+        if args.plot_power:
+            validator.plot_power_vs_n(x_scale=args.x_scale)
 
         if args.plot:
             all_residuals = []

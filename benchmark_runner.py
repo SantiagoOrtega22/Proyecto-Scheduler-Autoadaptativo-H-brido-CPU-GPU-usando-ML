@@ -108,6 +108,7 @@ FFT_TIME_PATTERN = re.compile(
 
 _RAPL_WARNING_SHOWN = False
 POWER_SAMPLE_INTERVAL_SEC = 0.02
+IDLE_POWER_CPU = 4.5246
 
 DEFAULT_DATABANK_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bench_files", "databank")
 DEFAULT_DATABANK_MAX_N = 8192
@@ -892,11 +893,21 @@ def run_single_case(
         time_sec = float(match.group(1))
 
         # 3. Power Monitoring Execution (Segunda ejecucion identica con monitor activo)
+        K = min(20000, max(1, round(0.15 / time_sec)))
+        cmd_pwr = list(cmd)
+        try:
+            iters_idx = cmd_pwr.index("--iters")
+            cmd_pwr[iters_idx + 1] = str(K)
+        except ValueError:
+            cmd_pwr.extend(["--iters", str(K)])
+
         power_queue = queue.Queue(maxsize=1)
         stop_event = threading.Event()
-
         monitor_thread = None
-        start_wall = time.perf_counter()
+        
+        rapl = None
+        e0 = 0
+        t0 = 0.0
 
         if device == "gpu":
             handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
@@ -905,23 +916,24 @@ def run_single_case(
                 args=(handle, stop_event, power_queue),
                 daemon=True,
             )
+            if monitor_thread is not None:
+                monitor_thread.start()
         else:
             rapl = find_rapl_energy_path()
             if rapl:
-                monitor_thread = threading.Thread(
-                    target=monitor_power_cpu,
-                    args=(rapl, stop_event, power_queue),
-                    daemon=True,
-                )
+                try:
+                    t0 = time.perf_counter()
+                    with open(rapl, "r") as f:
+                        e0 = int(f.read().strip())
+                except Exception as ex:
+                    print(f"[!] Error al leer RAPL inicial: {ex}", file=sys.stderr)
             else:
                 warn_rapl_missing_once()
 
-        if monitor_thread is not None:
-            monitor_thread.start()
-
+        start_wall = time.perf_counter()
         try:
             proc_pwr = subprocess.run(
-                cmd,
+                cmd_pwr,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -933,7 +945,7 @@ def run_single_case(
                 monitor_thread.join()
 
         end_wall = time.perf_counter()
-        samples = power_queue.get() if not power_queue.empty() else []
+        samples = []
 
         if proc_pwr.returncode != 0:
             raise RuntimeError(
@@ -950,18 +962,31 @@ def run_single_case(
         power_window_sec = wall_time
 
         if device == "gpu":
-            avg_power_w, energy_j = average_and_energy_from_samples(samples)
+            samples = power_queue.get() if not power_queue.empty() else []
+            avg_power_w, energy_total_j = average_and_energy_from_samples(samples)
+            energy_j = energy_total_j / K
             if samples:
                 power_window_sec = samples[-1][0] - samples[0][0]
         else:
-            if len(samples) >= 2:
-                e0 = samples[0][1]
-                e1 = samples[1][1]
-                energy_j = max(0.0, e1 - e0)
-                power_window_sec = samples[-1][0] - samples[0][0]
-                if power_window_sec <= 0.0:
-                    power_window_sec = wall_time
-                avg_power_w = energy_j / power_window_sec if power_window_sec > 0 else 0.0
+            if rapl:
+                try:
+                    t1 = time.perf_counter()
+                    with open(rapl, "r") as f:
+                        e1 = int(f.read().strip())
+                    energy_total_j = max(0.0, (e1 - e0) / 1e6)
+                    power_window_sec = t1 - t0
+                    if power_window_sec <= 0.0:
+                        power_window_sec = wall_time
+                    
+                    # Subtract CPU PKG idle power to obtain active power/energy
+                    raw_avg_power = energy_total_j / power_window_sec if power_window_sec > 0 else 0.0
+                    avg_power_w = max(0.0, raw_avg_power - IDLE_POWER_CPU)
+                    energy_total_j = avg_power_w * power_window_sec
+                    energy_j = energy_total_j / K
+                except Exception as ex:
+                    print(f"[!] Error al leer RAPL final: {ex}", file=sys.stderr)
+                    avg_power_w = 0.0
+                    energy_j = 0.0
             else:
                 avg_power_w = 0.0
                 energy_j = 0.0
@@ -986,7 +1011,7 @@ def run_single_case(
             "Avg_Power_W": avg_power_w,
             "Energy_J": energy_j,
             "EDP": edp,
-            "Power_Samples": len(samples),
+            "Power_Samples": len(samples) if device == "gpu" else (2 if rapl else 0),
             "Wall_Elapsed_sec": end_wall - start_wall,
         }
     finally:
@@ -1080,11 +1105,20 @@ def run_single_case_fft(
         time_sec = float(match.group(2)) / 1e3
 
     # 3. Power Monitoring Execution (Segunda ejecucion con monitor activo)
+    K = min(20000, max(1, round(0.15 / time_sec)))
+    cmd_pwr = list(cmd)
+    if len(cmd_pwr) > 10:
+        cmd_pwr[10] = str(K)
+    else:
+        raise ValueError(f"Comando FFT mal formado para agregar iteraciones: {cmd_pwr}")
+
     power_queue = queue.Queue(maxsize=1)
     stop_event = threading.Event()
-
     monitor_thread = None
-    start_wall = time.perf_counter()
+    
+    rapl = None
+    e0 = 0
+    t0 = 0.0
 
     if device == "gpu":
         handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
@@ -1093,23 +1127,24 @@ def run_single_case_fft(
             args=(handle, stop_event, power_queue),
             daemon=True,
         )
+        if monitor_thread is not None:
+            monitor_thread.start()
     else:
         rapl = find_rapl_energy_path()
         if rapl:
-            monitor_thread = threading.Thread(
-                target=monitor_power_cpu,
-                args=(rapl, stop_event, power_queue),
-                daemon=True,
-            )
+            try:
+                t0 = time.perf_counter()
+                with open(rapl, "r") as f:
+                    e0 = int(f.read().strip())
+            except Exception as ex:
+                print(f"[!] Error al leer RAPL inicial en FFT: {ex}", file=sys.stderr)
         else:
             warn_rapl_missing_once()
 
-    if monitor_thread is not None:
-        monitor_thread.start()
-
+    start_wall = time.perf_counter()
     try:
         proc_pwr = subprocess.run(
-            cmd,
+            cmd_pwr,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -1121,7 +1156,7 @@ def run_single_case_fft(
             monitor_thread.join()
 
     end_wall = time.perf_counter()
-    samples = power_queue.get() if not power_queue.empty() else []
+    samples = []
     
     if proc_pwr.returncode != 0:
         raise RuntimeError("Fallo en ejecucion de monitoreo de FFT.")
@@ -1134,18 +1169,34 @@ def run_single_case_fft(
     power_window_sec = wall_time
 
     if device == "gpu":
-        avg_power_w, energy_j = average_and_energy_from_samples(samples)
+        samples = power_queue.get() if not power_queue.empty() else []
+        avg_power_w, energy_total_j = average_and_energy_from_samples(samples)
+        energy_j = energy_total_j / K
         if samples:
             power_window_sec = samples[-1][0] - samples[0][0]
     else:
-        if len(samples) >= 2:
-            e0 = samples[0][1]
-            e1 = samples[1][1]
-            energy_j = max(0.0, e1 - e0)
-            power_window_sec = samples[-1][0] - samples[0][0]
-            if power_window_sec <= 0.0:
-                power_window_sec = wall_time
-            avg_power_w = energy_j / power_window_sec if power_window_sec > 0 else 0.0
+        if rapl:
+            try:
+                t1 = time.perf_counter()
+                with open(rapl, "r") as f:
+                    e1 = int(f.read().strip())
+                energy_total_j = max(0.0, (e1 - e0) / 1e6)
+                power_window_sec = t1 - t0
+                if power_window_sec <= 0.0:
+                    power_window_sec = wall_time
+                
+                # Subtract CPU PKG idle power to obtain active power/energy
+                raw_avg_power = energy_total_j / power_window_sec if power_window_sec > 0 else 0.0
+                avg_power_w = max(0.0, raw_avg_power - IDLE_POWER_CPU)
+                energy_total_j = avg_power_w * power_window_sec
+                energy_j = energy_total_j / K
+            except Exception as ex:
+                print(f"[!] Error al leer RAPL final en FFT: {ex}", file=sys.stderr)
+                avg_power_w = 0.0
+                energy_j = 0.0
+        else:
+            avg_power_w = 0.0
+            energy_j = 0.0
 
     dims = fft_dims(nx, ny, nz)
     ops = fft_flops(dims, domain) * batch
@@ -1171,7 +1222,7 @@ def run_single_case_fft(
         "EDP": edp,
         "Payload_Bytes": payload_bytes,
         "Radix_Class": radix_class,
-        "Samples_Power": len(samples),
+        "Samples_Power": len(samples) if device == "gpu" else (2 if rapl else 0),
         "Wall_Elapsed_sec": end_wall - start_wall,
     }
 
