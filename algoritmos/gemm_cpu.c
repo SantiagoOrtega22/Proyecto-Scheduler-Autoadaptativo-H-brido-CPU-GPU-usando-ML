@@ -570,8 +570,8 @@ static int parse_cli(int argc, char **argv, GemmCli *cli) {
 		fprintf(stderr, "Debes indicar el archivo de origen con --source o como argumento final\n");
 		return -1;
 	}
-	if (cli->warmup_runs < 0 || cli->iters <= 0) {
-		fprintf(stderr, "Warmup e iters deben ser positivos\n");
+	if (cli->warmup_runs < 0 || cli->iters < 0) {
+		fprintf(stderr, "Warmup debe ser no-negativo e iters no-negativo\n");
 		return -1;
 	}
 
@@ -600,7 +600,7 @@ static int run_sgemm_case(
 	char op_a,
 	char op_b,
 	int warmup_runs,
-	int iters,
+	int *iters,
 	double *out_time_sec) {
 	float *A = (float *)input->a;
 	float *B = (float *)input->b;
@@ -621,15 +621,28 @@ static int run_sgemm_case(
 					alpha, A, lda, B, ldb, beta, C, ldc);
 	}
 
+	int run_iters = *iters;
+	if (run_iters <= 0) {
+		double t0 = monotonic_time_sec();
+		cblas_sgemm(CblasRowMajor, transA, transB, input->m, input->n, input->k, 
+					alpha, A, lda, B, ldb, beta, C, ldc);
+		double t1 = monotonic_time_sec();
+		double t1rep = t1 - t0;
+		run_iters = (int)(0.15 / (t1rep > 1e-9 ? t1rep : 1e-9));
+		if (run_iters < 5) run_iters = 5;
+		if (run_iters > 20000) run_iters = 20000;
+		*iters = run_iters;
+	}
+
 	// Timed execution phase
 	double start = monotonic_time_sec();
-	for (int i = 0; i < iters; ++i) {
+	for (int i = 0; i < run_iters; ++i) {
 		cblas_sgemm(CblasRowMajor, transA, transB, input->m, input->n, input->k, 
 					alpha, A, lda, B, ldb, beta, C, ldc);
 	}
 	double end = monotonic_time_sec();
 
-	*out_time_sec = (end - start) / (double)iters;
+	*out_time_sec = (end - start) / (double)run_iters;
 	return 0;
 }
 
@@ -655,7 +668,7 @@ static int run_dgemm_case(
 	char op_a,
 	char op_b,
 	int warmup_runs,
-	int iters,
+	int *iters,
 	double *out_time_sec) {
 	double *A = (double *)input->a;
 	double *B = (double *)input->b;
@@ -676,15 +689,28 @@ static int run_dgemm_case(
 					alpha, A, lda, B, ldb, beta, C, ldc);
 	}
 
+	int run_iters = *iters;
+	if (run_iters <= 0) {
+		double t0 = monotonic_time_sec();
+		cblas_dgemm(CblasRowMajor, transA, transB, input->m, input->n, input->k, 
+					alpha, A, lda, B, ldb, beta, C, ldc);
+		double t1 = monotonic_time_sec();
+		double t1rep = t1 - t0;
+		run_iters = (int)(0.15 / (t1rep > 1e-9 ? t1rep : 1e-9));
+		if (run_iters < 5) run_iters = 5;
+		if (run_iters > 20000) run_iters = 20000;
+		*iters = run_iters;
+	}
+
 	// Timed execution phase
 	double start = monotonic_time_sec();
-	for (int i = 0; i < iters; ++i) {
+	for (int i = 0; i < run_iters; ++i) {
 		cblas_dgemm(CblasRowMajor, transA, transB, input->m, input->n, input->k, 
 					alpha, A, lda, B, ldb, beta, C, ldc);
 	}
 	double end = monotonic_time_sec();
 
-	*out_time_sec = (end - start) / (double)iters;
+	*out_time_sec = (end - start) / (double)run_iters;
 	return 0;
 }
 
@@ -710,7 +736,7 @@ static int run_cgemm_case(
 	char op_a,
 	char op_b,
 	int warmup_runs,
-	int iters,
+	int *iters,
 	double *out_time_sec) {
 	void *A = input->a;
 	void *B = input->b;
@@ -731,15 +757,28 @@ static int run_cgemm_case(
 					&alpha, A, lda, B, ldb, &beta, C, ldc);
 	}
 
+	int run_iters = *iters;
+	if (run_iters <= 0) {
+		double t0 = monotonic_time_sec();
+		cblas_cgemm(CblasRowMajor, transA, transB, input->m, input->n, input->k, 
+					&alpha, A, lda, B, ldb, &beta, C, ldc);
+		double t1 = monotonic_time_sec();
+		double t1rep = t1 - t0;
+		run_iters = (int)(0.15 / (t1rep > 1e-9 ? t1rep : 1e-9));
+		if (run_iters < 5) run_iters = 5;
+		if (run_iters > 20000) run_iters = 20000;
+		*iters = run_iters;
+	}
+
 	// Timed execution phase
 	double start = monotonic_time_sec();
-	for (int i = 0; i < iters; ++i) {
+	for (int i = 0; i < run_iters; ++i) {
 		cblas_cgemm(CblasRowMajor, transA, transB, input->m, input->n, input->k, 
 					&alpha, A, lda, B, ldb, &beta, C, ldc);
 	}
 	double end = monotonic_time_sec();
 
-	*out_time_sec = (end - start) / (double)iters;
+	*out_time_sec = (end - start) / (double)run_iters;
 	return 0;
 }
 
@@ -765,7 +804,7 @@ static int run_zgemm_case(
 	char op_a,
 	char op_b,
 	int warmup_runs,
-	int iters,
+	int *iters,
 	double *out_time_sec) {
 	void *A = input->a;
 	void *B = input->b;
@@ -786,15 +825,28 @@ static int run_zgemm_case(
 					&alpha, A, lda, B, ldb, &beta, C, ldc);
 	}
 
+	int run_iters = *iters;
+	if (run_iters <= 0) {
+		double t0 = monotonic_time_sec();
+		cblas_zgemm(CblasRowMajor, transA, transB, input->m, input->n, input->k, 
+					&alpha, A, lda, B, ldb, &beta, C, ldc);
+		double t1 = monotonic_time_sec();
+		double t1rep = t1 - t0;
+		run_iters = (int)(0.15 / (t1rep > 1e-9 ? t1rep : 1e-9));
+		if (run_iters < 5) run_iters = 5;
+		if (run_iters > 20000) run_iters = 20000;
+		*iters = run_iters;
+	}
+
 	// Timed execution phase
 	double start = monotonic_time_sec();
-	for (int i = 0; i < iters; ++i) {
+	for (int i = 0; i < run_iters; ++i) {
 		cblas_zgemm(CblasRowMajor, transA, transB, input->m, input->n, input->k, 
 					&alpha, A, lda, B, ldb, &beta, C, ldc);
 	}
 	double end = monotonic_time_sec();
 
-	*out_time_sec = (end - start) / (double)iters;
+	*out_time_sec = (end - start) / (double)run_iters;
 	return 0;
 }
 
@@ -858,16 +910,16 @@ int main(int argc, char **argv) {
 	// Execute corresponding GEMM kernel based on the loaded matrix precision
 	switch (input.precision) {
 		case 'S':
-			rc = run_sgemm_case(&input, cli.op_a, cli.op_b, cli.warmup_runs, cli.iters, &time_sec);
+			rc = run_sgemm_case(&input, cli.op_a, cli.op_b, cli.warmup_runs, &cli.iters, &time_sec);
 			break;
 		case 'D':
-			rc = run_dgemm_case(&input, cli.op_a, cli.op_b, cli.warmup_runs, cli.iters, &time_sec);
+			rc = run_dgemm_case(&input, cli.op_a, cli.op_b, cli.warmup_runs, &cli.iters, &time_sec);
 			break;
 		case 'C':
-			rc = run_cgemm_case(&input, cli.op_a, cli.op_b, cli.warmup_runs, cli.iters, &time_sec);
+			rc = run_cgemm_case(&input, cli.op_a, cli.op_b, cli.warmup_runs, &cli.iters, &time_sec);
 			break;
 		case 'Z':
-			rc = run_zgemm_case(&input, cli.op_a, cli.op_b, cli.warmup_runs, cli.iters, &time_sec);
+			rc = run_zgemm_case(&input, cli.op_a, cli.op_b, cli.warmup_runs, &cli.iters, &time_sec);
 			break;
 		default:
 			fprintf(stderr, "Precision invalida: %c\n", input.precision);
@@ -889,13 +941,14 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 
-	printf("M=%d N=%d K=%d Precision=%c OpA=%c OpB=%c Time_sec=%.9f\n",
+	printf("M=%d N=%d K=%d Precision=%c OpA=%c OpB=%c Time_sec=%.9f Iters=%d\n",
 		   final_m,
 		   final_n,
 		   final_k,
 		   final_precision,
 		   final_op_a,
 		   final_op_b,
-		   time_sec);
+		   time_sec,
+		   cli.iters);
 	return 0;
 }

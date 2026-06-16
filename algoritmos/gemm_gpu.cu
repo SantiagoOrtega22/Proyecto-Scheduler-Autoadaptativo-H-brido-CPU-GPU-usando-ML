@@ -601,8 +601,8 @@ static int parse_cli(int argc, char **argv, GemmCli *cli) {
 		fprintf(stderr, "Debes indicar el archivo de origen con --source o como argumento final\n");
 		return -1;
 	}
-	if (cli->warmup_runs < 0 || cli->iters <= 0) {
-		fprintf(stderr, "Warmup e iters deben ser positivos\n");
+	if (cli->warmup_runs < 0 || cli->iters < 0) {
+		fprintf(stderr, "Warmup debe ser no-negativo e iters no-negativo\n");
 		return -1;
 	}
 
@@ -633,7 +633,7 @@ static int run_sgemm_case(
 	char op_a,
 	char op_b,
 	int warmup_runs,
-	int iters,
+	int *iters,
 	double *out_time_sec) {
 	float *h_a = (float *)input->a;
 	float *h_b = (float *)input->b;
@@ -654,36 +654,45 @@ static int run_sgemm_case(
 	CHECK_CUDA(cudaMalloc((void **)&d_b, b_bytes));
 	CHECK_CUDA(cudaMalloc((void **)&d_c, c_bytes));
 
+	// Copy input matrices once to GPU
+	CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
+	CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
+	CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
+	CHECK_CUDA(cudaDeviceSynchronize());
+
 	// HPC Rigor: Warm-up phase to stabilize GPU clock speeds and initialize cuBLAS libraries
 	for (int i = 0; i < warmup_runs; ++i) {
-		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
-		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
-		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUBLAS(cublasSgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
 								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
-		// Explicit synchronization to ensure the current iteration finishes before copying back
+	}
+	CHECK_CUDA(cudaDeviceSynchronize());
+
+	int run_iters = *iters;
+	if (run_iters <= 0) {
+		double t0 = monotonic_time_sec();
+		CHECK_CUBLAS(cublasSgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
+								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
 		CHECK_CUDA(cudaDeviceSynchronize());
-		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
+		double t1 = monotonic_time_sec();
+		double t1rep = t1 - t0;
+		run_iters = (int)(0.15 / (t1rep > 1e-9 ? t1rep : 1e-9));
+		if (run_iters < 5) run_iters = 5;
+		if (run_iters > 20000) run_iters = 20000;
+		*iters = run_iters;
 	}
 
-	// Explicit synchronization: Ensure all warm-up tasks have completely finished prior to timing
-	CHECK_CUDA(cudaDeviceSynchronize());
 	double start = monotonic_time_sec();
-	
-	// Timed execution phase
-	for (int i = 0; i < iters; ++i) {
-		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
-		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
-		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
+	for (int i = 0; i < run_iters; ++i) {
 		CHECK_CUBLAS(cublasSgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
 								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
-		// Explicit synchronization: Ensure the GPU finishes execution before measuring the end time
-		CHECK_CUDA(cudaDeviceSynchronize());
-		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
 	}
+	CHECK_CUDA(cudaDeviceSynchronize());
 	double end = monotonic_time_sec();
 
-	*out_time_sec = (end - start) / (double)iters;
+	// Copy output matrix back to host
+	CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
+
+	*out_time_sec = (end - start) / (double)run_iters;
 
 	// HPC Rigor: Clean up allocated GPU resources to prevent memory leaks during sweeps
 	cudaFree(d_a);
@@ -716,7 +725,7 @@ static int run_dgemm_case(
 	char op_a,
 	char op_b,
 	int warmup_runs,
-	int iters,
+	int *iters,
 	double *out_time_sec) {
 	double *h_a = (double *)input->a;
 	double *h_b = (double *)input->b;
@@ -737,36 +746,45 @@ static int run_dgemm_case(
 	CHECK_CUDA(cudaMalloc((void **)&d_b, b_bytes));
 	CHECK_CUDA(cudaMalloc((void **)&d_c, c_bytes));
 
+	// Copy input matrices once to GPU
+	CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
+	CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
+	CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
+	CHECK_CUDA(cudaDeviceSynchronize());
+
 	// HPC Rigor: Warm-up phase to stabilize GPU clock speeds and initialize cuBLAS libraries
 	for (int i = 0; i < warmup_runs; ++i) {
-		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
-		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
-		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUBLAS(cublasDgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
 								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
-		// Explicit synchronization to ensure the current iteration finishes before copying back
+	}
+	CHECK_CUDA(cudaDeviceSynchronize());
+
+	int run_iters = *iters;
+	if (run_iters <= 0) {
+		double t0 = monotonic_time_sec();
+		CHECK_CUBLAS(cublasDgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
+								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
 		CHECK_CUDA(cudaDeviceSynchronize());
-		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
+		double t1 = monotonic_time_sec();
+		double t1rep = t1 - t0;
+		run_iters = (int)(0.15 / (t1rep > 1e-9 ? t1rep : 1e-9));
+		if (run_iters < 5) run_iters = 5;
+		if (run_iters > 20000) run_iters = 20000;
+		*iters = run_iters;
 	}
 
-	// Explicit synchronization: Ensure all warm-up tasks have completely finished prior to timing
-	CHECK_CUDA(cudaDeviceSynchronize());
 	double start = monotonic_time_sec();
-	
-	// Timed execution phase
-	for (int i = 0; i < iters; ++i) {
-		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
-		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
-		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
+	for (int i = 0; i < run_iters; ++i) {
 		CHECK_CUBLAS(cublasDgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
 								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
-		// Explicit synchronization: Ensure the GPU finishes execution before measuring the end time
-		CHECK_CUDA(cudaDeviceSynchronize());
-		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
 	}
+	CHECK_CUDA(cudaDeviceSynchronize());
 	double end = monotonic_time_sec();
 
-	*out_time_sec = (end - start) / (double)iters;
+	// Copy output matrix back to host
+	CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
+
+	*out_time_sec = (end - start) / (double)run_iters;
 
 	// HPC Rigor: Clean up allocated GPU resources to prevent memory leaks during sweeps
 	cudaFree(d_a);
@@ -799,7 +817,7 @@ static int run_cgemm_case(
 	char op_a,
 	char op_b,
 	int warmup_runs,
-	int iters,
+	int *iters,
 	double *out_time_sec) {
 	cuComplex *h_a = (cuComplex *)input->a;
 	cuComplex *h_b = (cuComplex *)input->b;
@@ -820,36 +838,45 @@ static int run_cgemm_case(
 	CHECK_CUDA(cudaMalloc((void **)&d_b, b_bytes));
 	CHECK_CUDA(cudaMalloc((void **)&d_c, c_bytes));
 
+	// Copy input matrices once to GPU
+	CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
+	CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
+	CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
+	CHECK_CUDA(cudaDeviceSynchronize());
+
 	// HPC Rigor: Warm-up phase to stabilize GPU clock speeds and initialize cuBLAS libraries
 	for (int i = 0; i < warmup_runs; ++i) {
-		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
-		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
-		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUBLAS(cublasCgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
 								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
-		// Explicit synchronization to ensure the current iteration finishes before copying back
+	}
+	CHECK_CUDA(cudaDeviceSynchronize());
+
+	int run_iters = *iters;
+	if (run_iters <= 0) {
+		double t0 = monotonic_time_sec();
+		CHECK_CUBLAS(cublasCgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
+								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
 		CHECK_CUDA(cudaDeviceSynchronize());
-		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
+		double t1 = monotonic_time_sec();
+		double t1rep = t1 - t0;
+		run_iters = (int)(0.15 / (t1rep > 1e-9 ? t1rep : 1e-9));
+		if (run_iters < 5) run_iters = 5;
+		if (run_iters > 20000) run_iters = 20000;
+		*iters = run_iters;
 	}
 
-	// Explicit synchronization: Ensure all warm-up tasks have completely finished prior to timing
-	CHECK_CUDA(cudaDeviceSynchronize());
 	double start = monotonic_time_sec();
-	
-	// Timed execution phase
-	for (int i = 0; i < iters; ++i) {
-		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
-		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
-		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
+	for (int i = 0; i < run_iters; ++i) {
 		CHECK_CUBLAS(cublasCgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
 								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
-		// Explicit synchronization: Ensure the GPU finishes execution before measuring the end time
-		CHECK_CUDA(cudaDeviceSynchronize());
-		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
 	}
+	CHECK_CUDA(cudaDeviceSynchronize());
 	double end = monotonic_time_sec();
 
-	*out_time_sec = (end - start) / (double)iters;
+	// Copy output matrix back to host
+	CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
+
+	*out_time_sec = (end - start) / (double)run_iters;
 
 	// HPC Rigor: Clean up allocated GPU resources to prevent memory leaks during sweeps
 	cudaFree(d_a);
@@ -882,7 +909,7 @@ static int run_zgemm_case(
 	char op_a,
 	char op_b,
 	int warmup_runs,
-	int iters,
+	int *iters,
 	double *out_time_sec) {
 	cuDoubleComplex *h_a = (cuDoubleComplex *)input->a;
 	cuDoubleComplex *h_b = (cuDoubleComplex *)input->b;
@@ -903,36 +930,45 @@ static int run_zgemm_case(
 	CHECK_CUDA(cudaMalloc((void **)&d_b, b_bytes));
 	CHECK_CUDA(cudaMalloc((void **)&d_c, c_bytes));
 
+	// Copy input matrices once to GPU
+	CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
+	CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
+	CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
+	CHECK_CUDA(cudaDeviceSynchronize());
+
 	// HPC Rigor: Warm-up phase to stabilize GPU clock speeds and initialize cuBLAS libraries
 	for (int i = 0; i < warmup_runs; ++i) {
-		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
-		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
-		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUBLAS(cublasZgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
 								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
-		// Explicit synchronization to ensure the current iteration finishes before copying back
+	}
+	CHECK_CUDA(cudaDeviceSynchronize());
+
+	int run_iters = *iters;
+	if (run_iters <= 0) {
+		double t0 = monotonic_time_sec();
+		CHECK_CUBLAS(cublasZgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
+								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
 		CHECK_CUDA(cudaDeviceSynchronize());
-		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
+		double t1 = monotonic_time_sec();
+		double t1rep = t1 - t0;
+		run_iters = (int)(0.15 / (t1rep > 1e-9 ? t1rep : 1e-9));
+		if (run_iters < 5) run_iters = 5;
+		if (run_iters > 20000) run_iters = 20000;
+		*iters = run_iters;
 	}
 
-	// Explicit synchronization: Ensure all warm-up tasks have completely finished prior to timing
-	CHECK_CUDA(cudaDeviceSynchronize());
 	double start = monotonic_time_sec();
-	
-	// Timed execution phase
-	for (int i = 0; i < iters; ++i) {
-		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
-		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
-		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
+	for (int i = 0; i < run_iters; ++i) {
 		CHECK_CUBLAS(cublasZgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
 								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
-		// Explicit synchronization: Ensure the GPU finishes execution before measuring the end time
-		CHECK_CUDA(cudaDeviceSynchronize());
-		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
 	}
+	CHECK_CUDA(cudaDeviceSynchronize());
 	double end = monotonic_time_sec();
 
-	*out_time_sec = (end - start) / (double)iters;
+	// Copy output matrix back to host
+	CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
+
+	*out_time_sec = (end - start) / (double)run_iters;
 
 	// HPC Rigor: Clean up allocated GPU resources to prevent memory leaks during sweeps
 	cudaFree(d_a);
@@ -1007,16 +1043,16 @@ int main(int argc, char **argv) {
 	// Execute corresponding GEMM kernel based on the loaded matrix precision
 	switch (input.precision) {
 		case 'S':
-			rc = run_sgemm_case(handle, &input, cli.op_a, cli.op_b, cli.warmup_runs, cli.iters, &time_sec);
+			rc = run_sgemm_case(handle, &input, cli.op_a, cli.op_b, cli.warmup_runs, &cli.iters, &time_sec);
 			break;
 		case 'D':
-			rc = run_dgemm_case(handle, &input, cli.op_a, cli.op_b, cli.warmup_runs, cli.iters, &time_sec);
+			rc = run_dgemm_case(handle, &input, cli.op_a, cli.op_b, cli.warmup_runs, &cli.iters, &time_sec);
 			break;
 		case 'C':
-			rc = run_cgemm_case(handle, &input, cli.op_a, cli.op_b, cli.warmup_runs, cli.iters, &time_sec);
+			rc = run_cgemm_case(handle, &input, cli.op_a, cli.op_b, cli.warmup_runs, &cli.iters, &time_sec);
 			break;
 		case 'Z':
-			rc = run_zgemm_case(handle, &input, cli.op_a, cli.op_b, cli.warmup_runs, cli.iters, &time_sec);
+			rc = run_zgemm_case(handle, &input, cli.op_a, cli.op_b, cli.warmup_runs, &cli.iters, &time_sec);
 			break;
 		default:
 			fprintf(stderr, "Precision invalida: %c\n", input.precision);
@@ -1041,13 +1077,14 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 
-	printf("M=%d N=%d K=%d Precision=%c OpA=%c OpB=%c Time_sec=%.9f\n",
+	printf("M=%d N=%d K=%d Precision=%c OpA=%c OpB=%c Time_sec=%.9f Iters=%d\n",
 		   final_m,
 		   final_n,
 		   final_k,
 		   final_precision,
 		   final_op_a,
 		   final_op_b,
-		   time_sec);
+		   time_sec,
+		   cli.iters);
 	return 0;
 }

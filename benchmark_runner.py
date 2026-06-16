@@ -108,7 +108,7 @@ FFT_TIME_PATTERN = re.compile(
 
 _RAPL_WARNING_SHOWN = False
 POWER_SAMPLE_INTERVAL_SEC = 0.02
-IDLE_POWER_CPU = 4.5246
+IDLE_POWER_CPU = 0.0
 
 DEFAULT_DATABANK_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bench_files", "databank")
 DEFAULT_DATABANK_MAX_N = 8192
@@ -583,27 +583,17 @@ def monitor_power_cpu(energy_path, stop_event, power_queue):
     power_queue.put(samples)
 
 
-def find_rapl_energy_path():
+def find_rapl_energy_paths():
     # Busca energy_uj sin recorrer recursivamente todo powercap; así evitamos bloqueos.
     base_dir = "/sys/class/powercap"
+    paths = []
     if not os.path.isdir(base_dir):
-        return None
+        return paths
 
-    def is_readable_energy(path):
-        return os.path.isfile(path) and os.access(path, os.R_OK)
+    def is_readable(p):
+        return os.path.isfile(p) and os.access(p, os.R_OK)
 
-    # Rutas comunes conocidas (intel-rapl:0 es el primer socket en la mayoría de sistemas)
-    common_paths = [
-        os.path.join(base_dir, "intel-rapl:0", "energy_uj"),
-        os.path.join(base_dir, "intel-rapl:0:0", "energy_uj"),
-        os.path.join(base_dir, "intel-rapl", "energy_uj"),
-    ]
-    
-    for path in common_paths:
-        if is_readable_energy(path):
-            return path
-
-    # Si no encontró en rutas conocidas, busca recursivamente limitado a nivel 2
+    # Escaneo dinámico buscando Package energy domains (sockets físicos)
     try:
         with os.scandir(base_dir) as entries:
             for entry in entries:
@@ -612,24 +602,27 @@ def find_rapl_energy_path():
                 if not entry.name.startswith("intel-rapl"):
                     continue
 
-                direct_energy = os.path.join(base_dir, entry.name, "energy_uj")
-                if is_readable_energy(direct_energy):
-                    return direct_energy
+                name_path = os.path.join(base_dir, entry.name, "name")
+                energy_path = os.path.join(base_dir, entry.name, "energy_uj")
 
-                try:
-                    with os.scandir(os.path.join(base_dir, entry.name)) as child_entries:
-                        for child in child_entries:
-                            if not child.is_dir(follow_symlinks=False):
-                                continue
-                            nested_energy = os.path.join(base_dir, entry.name, child.name, "energy_uj")
-                            if is_readable_energy(nested_energy):
-                                return nested_energy
-                except OSError:
-                    continue
+                if is_readable(name_path) and is_readable(energy_path):
+                    try:
+                        with open(name_path, "r") as f:
+                            name_val = f.read().strip().lower()
+                        if "package" in name_val:
+                            paths.append(energy_path)
+                    except Exception:
+                        continue
     except OSError:
-        return None
+        pass
 
-    return None
+    # Fallback si no se encontró nada por nombre, pero intel-rapl:0 es legible
+    if not paths:
+        fallback = os.path.join(base_dir, "intel-rapl:0", "energy_uj")
+        if is_readable(fallback):
+            paths.append(fallback)
+
+    return sorted(paths)
 
 
 def generate_gemm_matrix_file(
@@ -848,7 +841,7 @@ def run_single_case(
             "--op-b", op_b,
             "--source", matrix_file,
             "--warmup", "0",
-            "--iters", "1"
+            "--iters", "0" if not is_warmup else "1"
         ]
 
         if is_warmup:
@@ -905,8 +898,8 @@ def run_single_case(
         stop_event = threading.Event()
         monitor_thread = None
         
-        rapl = None
-        e0 = 0
+        rapl_paths = []
+        e0_list = []
         t0 = 0.0
 
         if device == "gpu":
@@ -919,14 +912,16 @@ def run_single_case(
             if monitor_thread is not None:
                 monitor_thread.start()
         else:
-            rapl = find_rapl_energy_path()
-            if rapl:
+            rapl_paths = find_rapl_energy_paths()
+            if rapl_paths:
                 try:
                     t0 = time.perf_counter()
-                    with open(rapl, "r") as f:
-                        e0 = int(f.read().strip())
+                    for p in rapl_paths:
+                        with open(p, "r") as f:
+                            e0_list.append(int(f.read().strip()))
                 except Exception as ex:
                     print(f"[!] Error al leer RAPL inicial: {ex}", file=sys.stderr)
+                    rapl_paths = []
             else:
                 warn_rapl_missing_once()
 
@@ -968,21 +963,28 @@ def run_single_case(
             if samples:
                 power_window_sec = samples[-1][0] - samples[0][0]
         else:
-            if rapl:
+            if rapl_paths:
                 try:
                     t1 = time.perf_counter()
-                    with open(rapl, "r") as f:
-                        e1 = int(f.read().strip())
-                    energy_total_j = max(0.0, (e1 - e0) / 1e6)
+                    energy_total_j = 0.0
+                    for i, p in enumerate(rapl_paths):
+                        with open(p, "r") as f:
+                            val = int(f.read().strip())
+                        diff = max(0.0, (val - e0_list[i]) / 1e6)
+                        energy_total_j += diff
+
                     power_window_sec = t1 - t0
                     if power_window_sec <= 0.0:
                         power_window_sec = wall_time
                     
-                    # Subtract CPU PKG idle power to obtain active power/energy
-                    raw_avg_power = energy_total_j / power_window_sec if power_window_sec > 0 else 0.0
-                    avg_power_w = max(0.0, raw_avg_power - IDLE_POWER_CPU)
-                    energy_total_j = avg_power_w * power_window_sec
-                    energy_j = energy_total_j / K
+                    # Deduce total idle energy consumption during the process window
+                    energy_idle = IDLE_POWER_CPU * power_window_sec
+                    energy_active = max(0.0, energy_total_j - energy_idle)
+                    
+                    # Calculate active power over the active computation loop (excluding startup/IO)
+                    t_active = K * time_sec
+                    avg_power_w = energy_active / t_active if t_active > 0.0 else 0.0
+                    energy_j = energy_active / K if K > 0 else 0.0
                 except Exception as ex:
                     print(f"[!] Error al leer RAPL final: {ex}", file=sys.stderr)
                     avg_power_w = 0.0
@@ -1011,7 +1013,7 @@ def run_single_case(
             "Avg_Power_W": avg_power_w,
             "Energy_J": energy_j,
             "EDP": edp,
-            "Power_Samples": len(samples) if device == "gpu" else (2 if rapl else 0),
+            "Power_Samples": len(samples) if device == "gpu" else (2 * len(rapl_paths) if rapl_paths else 0),
             "Wall_Elapsed_sec": end_wall - start_wall,
         }
     finally:
@@ -1050,7 +1052,7 @@ def run_single_case_fft(
         direction,
         layout,
         "0",  # warmup_runs = 0
-        "1",  # iters = 1
+        "0" if not is_warmup else "1",  # iters
     ]
     if plan is not None:
         cmd.append(plan)
@@ -1116,8 +1118,8 @@ def run_single_case_fft(
     stop_event = threading.Event()
     monitor_thread = None
     
-    rapl = None
-    e0 = 0
+    rapl_paths = []
+    e0_list = []
     t0 = 0.0
 
     if device == "gpu":
@@ -1130,14 +1132,16 @@ def run_single_case_fft(
         if monitor_thread is not None:
             monitor_thread.start()
     else:
-        rapl = find_rapl_energy_path()
-        if rapl:
+        rapl_paths = find_rapl_energy_paths()
+        if rapl_paths:
             try:
                 t0 = time.perf_counter()
-                with open(rapl, "r") as f:
-                    e0 = int(f.read().strip())
+                for p in rapl_paths:
+                    with open(p, "r") as f:
+                        e0_list.append(int(f.read().strip()))
             except Exception as ex:
                 print(f"[!] Error al leer RAPL inicial en FFT: {ex}", file=sys.stderr)
+                rapl_paths = []
         else:
             warn_rapl_missing_once()
 
@@ -1175,21 +1179,28 @@ def run_single_case_fft(
         if samples:
             power_window_sec = samples[-1][0] - samples[0][0]
     else:
-        if rapl:
+        if rapl_paths:
             try:
                 t1 = time.perf_counter()
-                with open(rapl, "r") as f:
-                    e1 = int(f.read().strip())
-                energy_total_j = max(0.0, (e1 - e0) / 1e6)
+                energy_total_j = 0.0
+                for i, p in enumerate(rapl_paths):
+                    with open(p, "r") as f:
+                        val = int(f.read().strip())
+                    diff = max(0.0, (val - e0_list[i]) / 1e6)
+                    energy_total_j += diff
+
                 power_window_sec = t1 - t0
                 if power_window_sec <= 0.0:
                     power_window_sec = wall_time
                 
-                # Subtract CPU PKG idle power to obtain active power/energy
-                raw_avg_power = energy_total_j / power_window_sec if power_window_sec > 0 else 0.0
-                avg_power_w = max(0.0, raw_avg_power - IDLE_POWER_CPU)
-                energy_total_j = avg_power_w * power_window_sec
-                energy_j = energy_total_j / K
+                # Deduce total idle energy consumption during the process window
+                energy_idle = IDLE_POWER_CPU * power_window_sec
+                energy_active = max(0.0, energy_total_j - energy_idle)
+                
+                # Calculate active power over the active computation loop (excluding startup/IO)
+                t_active = K * time_sec
+                avg_power_w = energy_active / t_active if t_active > 0.0 else 0.0
+                energy_j = energy_active / K if K > 0 else 0.0
             except Exception as ex:
                 print(f"[!] Error al leer RAPL final en FFT: {ex}", file=sys.stderr)
                 avg_power_w = 0.0
@@ -1222,7 +1233,7 @@ def run_single_case_fft(
         "EDP": edp,
         "Payload_Bytes": payload_bytes,
         "Radix_Class": radix_class,
-        "Samples_Power": len(samples) if device == "gpu" else (2 if rapl else 0),
+        "Samples_Power": len(samples) if device == "gpu" else (2 * len(rapl_paths) if rapl_paths else 0),
         "Wall_Elapsed_sec": end_wall - start_wall,
     }
 
@@ -1613,6 +1624,7 @@ def run_fft(args):
 
 
 def main():
+    global IDLE_POWER_CPU
     parser = argparse.ArgumentParser(
         description="Orquestador de benchmarking GEMM/FFT con monitoreo de potencia"
     )
@@ -1706,6 +1718,12 @@ def main():
         help="Techo de N para el rango compute-intensive del banco binario",
     )
     parser.add_argument(
+        "--idle-power-cpu",
+        type=float,
+        default=IDLE_POWER_CPU,
+        help="Potencia de CPU en reposo (idle) en Watts.",
+    )
+    parser.add_argument(
         "--gemm-warmup",
         type=int,
         default=4,
@@ -1792,6 +1810,8 @@ def main():
         help="Iteraciones medidas FFT",
     )
     args = parser.parse_args()
+
+    IDLE_POWER_CPU = args.idle_power_cpu
 
     # Compatibilidad: --binary sobreescribe --gemm-binary-gpu
     if args.binary is not None:

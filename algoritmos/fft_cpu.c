@@ -359,7 +359,7 @@ static void benchmark_fft_double(const FftConfig *cfg) {
     size_t total_real_inplace = nreal_inplace * (size_t)cfg->batch;
 
     int warmup = cfg->warmup > 0 ? cfg->warmup : 0;
-    int iters = cfg->iters > 0 ? cfg->iters : 0;
+    int iters = cfg->iters;
     int sign = (cfg->direction == 'I') ? FFTW_BACKWARD : FFTW_FORWARD;
     int plan_flags = (cfg->plan == 'E') ? FFTW_ESTIMATE : FFTW_MEASURE;
 
@@ -404,19 +404,26 @@ static void benchmark_fft_double(const FftConfig *cfg) {
             fftw_execute(plan);
         }
 
-        if (iters == 0) {
-            print_result(cfg, 0.0, 0.0);
-        } else {
-            double start = get_time_ms();
-            for (int i = 0; i < iters; ++i) {
-                fftw_execute(plan);
-            }
-            double elapsed_ms = (get_time_ms() - start) / iters;
-            double time_sec = elapsed_ms / 1e3;
-            double gflops = flops / (time_sec * 1e9);
-
-            print_result(cfg, time_sec, gflops);
+        int run_iters = iters;
+        if (run_iters <= 0) {
+            double t0 = get_time_ms();
+            fftw_execute(plan);
+            double t1 = get_time_ms();
+            double t1rep = (t1 - t0) / 1e3;
+            run_iters = (int)(0.15 / (t1rep > 1e-9 ? t1rep : 1e-9));
+            if (run_iters < 5) run_iters = 5;
+            if (run_iters > 20000) run_iters = 20000;
         }
+
+        double start = get_time_ms();
+        for (int i = 0; i < run_iters; ++i) {
+            fftw_execute(plan);
+        }
+        double elapsed_ms = (get_time_ms() - start) / run_iters;
+        double time_sec = elapsed_ms / 1e3;
+        double gflops = flops / (time_sec * 1e9);
+
+        print_result(cfg, time_sec, gflops);
 
         // HPC Rigor: Free allocations to avoid memory leaks (OOM) across sweeping parameters
         fftw_destroy_plan(plan);
@@ -494,19 +501,26 @@ static void benchmark_fft_double(const FftConfig *cfg) {
             fftw_execute(plan);
         }
 
-        if (iters == 0) {
-            print_result(cfg, 0.0, 0.0);
-        } else {
-            double start = get_time_ms();
-            for (int i = 0; i < iters; ++i) {
-                fftw_execute(plan);
-            }
-            double elapsed_ms = (get_time_ms() - start) / iters;
-            double time_sec = elapsed_ms / 1e3;
-            double gflops = flops / (time_sec * 1e9);
-
-            print_result(cfg, time_sec, gflops);
+        int run_iters = iters;
+        if (run_iters <= 0) {
+            double t0 = get_time_ms();
+            fftw_execute(plan);
+            double t1 = get_time_ms();
+            double t1rep = (t1 - t0) / 1e3;
+            run_iters = (int)(0.15 / (t1rep > 1e-9 ? t1rep : 1e-9));
+            if (run_iters < 5) run_iters = 5;
+            if (run_iters > 20000) run_iters = 20000;
         }
+
+        double start = get_time_ms();
+        for (int i = 0; i < run_iters; ++i) {
+            fftw_execute(plan);
+        }
+        double elapsed_ms = (get_time_ms() - start) / run_iters;
+        double time_sec = elapsed_ms / 1e3;
+        double gflops = flops / (time_sec * 1e9);
+
+        print_result(cfg, time_sec, gflops);
 
         // HPC Rigor: Free allocations to avoid memory leaks (OOM) across sweeping parameters
         fftw_destroy_plan(plan);
@@ -577,19 +591,26 @@ static void benchmark_fft_double(const FftConfig *cfg) {
             fftw_execute(plan);
         }
 
-        if (iters == 0) {
-            print_result(cfg, 0.0, 0.0);
-        } else {
-            double start = get_time_ms();
-            for (int i = 0; i < iters; ++i) {
-                fftw_execute(plan);
-            }
-            double elapsed_ms = (get_time_ms() - start) / iters;
-            double time_sec = elapsed_ms / 1e3;
-            double gflops = flops / (time_sec * 1e9);
-
-            print_result(cfg, time_sec, gflops);
+        int run_iters = iters;
+        if (run_iters <= 0) {
+            double t0 = get_time_ms();
+            fftw_execute(plan);
+            double t1 = get_time_ms();
+            double t1rep = (t1 - t0) / 1e3;
+            run_iters = (int)(0.15 / (t1rep > 1e-9 ? t1rep : 1e-9));
+            if (run_iters < 5) run_iters = 5;
+            if (run_iters > 20000) run_iters = 20000;
         }
+
+        double start = get_time_ms();
+        for (int i = 0; i < run_iters; ++i) {
+            fftw_execute(plan);
+        }
+        double elapsed_ms = (get_time_ms() - start) / run_iters;
+        double time_sec = elapsed_ms / 1e3;
+        double gflops = flops / (time_sec * 1e9);
+
+        print_result(cfg, time_sec, gflops);
 
         // HPC Rigor: Free allocations to avoid memory leaks (OOM) across sweeping parameters
         fftw_destroy_plan(plan);
@@ -617,7 +638,7 @@ static void benchmark_fft_float(const FftConfig *cfg) {
     size_t total_real_inplace = nreal_inplace * (size_t)cfg->batch;
 
     int warmup = cfg->warmup > 0 ? cfg->warmup : 0;
-    int iters = cfg->iters > 0 ? cfg->iters : 0;
+    int iters = cfg->iters;
     int sign = (cfg->direction == 'I') ? FFTW_BACKWARD : FFTW_FORWARD;
     int plan_flags = (cfg->plan == 'E') ? FFTW_ESTIMATE : FFTW_MEASURE;
 
@@ -663,19 +684,26 @@ static void benchmark_fft_float(const FftConfig *cfg) {
             fftwf_execute(plan);
         }
 
-        if (iters == 0) {
-            print_result(cfg, 0.0, 0.0);
-        } else {
-            double start = get_time_ms();
-            for (int i = 0; i < iters; ++i) {
-                fftwf_execute(plan);
-            }
-            double elapsed_ms = (get_time_ms() - start) / iters;
-            double time_sec = elapsed_ms / 1e3;
-            double gflops = flops / (time_sec * 1e9);
-
-            print_result(cfg, time_sec, gflops);
+        int run_iters = iters;
+        if (run_iters <= 0) {
+            double t0 = get_time_ms();
+            fftwf_execute(plan);
+            double t1 = get_time_ms();
+            double t1rep = (t1 - t0) / 1e3;
+            run_iters = (int)(0.15 / (t1rep > 1e-9 ? t1rep : 1e-9));
+            if (run_iters < 5) run_iters = 5;
+            if (run_iters > 20000) run_iters = 20000;
         }
+
+        double start = get_time_ms();
+        for (int i = 0; i < run_iters; ++i) {
+            fftwf_execute(plan);
+        }
+        double elapsed_ms = (get_time_ms() - start) / run_iters;
+        double time_sec = elapsed_ms / 1e3;
+        double gflops = flops / (time_sec * 1e9);
+
+        print_result(cfg, time_sec, gflops);
 
         // HPC Rigor: Free allocations to avoid memory leaks (OOM) across sweeping parameters
         fftwf_destroy_plan(plan);
@@ -753,19 +781,26 @@ static void benchmark_fft_float(const FftConfig *cfg) {
             fftwf_execute(plan);
         }
 
-        if (iters == 0) {
-            print_result(cfg, 0.0, 0.0);
-        } else {
-            double start = get_time_ms();
-            for (int i = 0; i < iters; ++i) {
-                fftwf_execute(plan);
-            }
-            double elapsed_ms = (get_time_ms() - start) / iters;
-            double time_sec = elapsed_ms / 1e3;
-            double gflops = flops / (time_sec * 1e9);
-
-            print_result(cfg, time_sec, gflops);
+        int run_iters = iters;
+        if (run_iters <= 0) {
+            double t0 = get_time_ms();
+            fftwf_execute(plan);
+            double t1 = get_time_ms();
+            double t1rep = (t1 - t0) / 1e3;
+            run_iters = (int)(0.15 / (t1rep > 1e-9 ? t1rep : 1e-9));
+            if (run_iters < 5) run_iters = 5;
+            if (run_iters > 20000) run_iters = 20000;
         }
+
+        double start = get_time_ms();
+        for (int i = 0; i < run_iters; ++i) {
+            fftwf_execute(plan);
+        }
+        double elapsed_ms = (get_time_ms() - start) / run_iters;
+        double time_sec = elapsed_ms / 1e3;
+        double gflops = flops / (time_sec * 1e9);
+
+        print_result(cfg, time_sec, gflops);
 
         // HPC Rigor: Free allocations to avoid memory leaks (OOM) across sweeping parameters
         fftwf_destroy_plan(plan);
@@ -824,19 +859,26 @@ static void benchmark_fft_float(const FftConfig *cfg) {
             fftwf_execute(plan);
         }
 
-        if (iters == 0) {
-            print_result(cfg, 0.0, 0.0);
-        } else {
-            double start = get_time_ms();
-            for (int i = 0; i < iters; ++i) {
-                fftwf_execute(plan);
-            }
-            double elapsed_ms = (get_time_ms() - start) / iters;
-            double time_sec = elapsed_ms / 1e3;
-            double gflops = flops / (time_sec * 1e9);
-
-            print_result(cfg, time_sec, gflops);
+        int run_iters = iters;
+        if (run_iters <= 0) {
+            double t0 = get_time_ms();
+            fftwf_execute(plan);
+            double t1 = get_time_ms();
+            double t1rep = (t1 - t0) / 1e3;
+            run_iters = (int)(0.15 / (t1rep > 1e-9 ? t1rep : 1e-9));
+            if (run_iters < 5) run_iters = 5;
+            if (run_iters > 20000) run_iters = 20000;
         }
+
+        double start = get_time_ms();
+        for (int i = 0; i < run_iters; ++i) {
+            fftwf_execute(plan);
+        }
+        double elapsed_ms = (get_time_ms() - start) / run_iters;
+        double time_sec = elapsed_ms / 1e3;
+        double gflops = flops / (time_sec * 1e9);
+
+        print_result(cfg, time_sec, gflops);
 
         // HPC Rigor: Free allocations to avoid memory leaks (OOM) across sweeping parameters
         fftwf_destroy_plan(plan);

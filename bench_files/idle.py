@@ -10,26 +10,20 @@ import time
 from typing import Optional
 
 
-def find_pkg_energy_path() -> Optional[str]:
-    """Finds the path to the Intel RAPL PKG energy file in sysfs.
-
-    Checks first for the standard socket 0 PKG domain directory and falls back
-    to scanning the powercap directories to locate the CPU Package domain.
+def find_pkg_energy_paths() -> list[str]:
+    """Finds all paths to the Intel RAPL PKG energy files in sysfs.
 
     Returns:
-        Optional[str]: The absolute path to the energy_uj file if readable,
-            otherwise None.
+        list[str]: Absolute paths to all Package energy_uj files found and readable.
     """
     base_dir = "/sys/class/powercap"
+    paths = []
     if not os.path.isdir(base_dir):
-        return None
+        return paths
 
-    # intel-rapl:0 is the first CPU socket (PKG domain) in most systems
-    common_path = os.path.join(base_dir, "intel-rapl:0", "energy_uj")
-    if os.path.isfile(common_path) and os.access(common_path, os.R_OK):
-        return common_path
+    def is_readable(p):
+        return os.path.isfile(p) and os.access(p, os.R_OK)
 
-    # Dynamic scanning for a folder with 'package' in its 'name' file
     try:
         with os.scandir(base_dir) as entries:
             for entry in entries:
@@ -40,26 +34,30 @@ def find_pkg_energy_path() -> Optional[str]:
 
                 name_path = os.path.join(base_dir, entry.name, "name")
                 energy_path = os.path.join(base_dir, entry.name, "energy_uj")
-                if (
-                    os.path.isfile(name_path)
-                    and os.path.isfile(energy_path)
-                    and os.access(energy_path, os.R_OK)
-                ):
-                    with open(name_path, "r") as f:
-                        name_val = f.read().strip().lower()
-                    if "package" in name_val:
-                        return energy_path
+                if is_readable(name_path) and is_readable(energy_path):
+                    try:
+                        with open(name_path, "r") as f:
+                            name_val = f.read().strip().lower()
+                        if "package" in name_val:
+                            paths.append(energy_path)
+                    except Exception:
+                        continue
     except OSError as e:
         print(f"Error scanning for RAPL PKG domain: {e}")
 
-    return None
+    if not paths:
+        fallback = os.path.join(base_dir, "intel-rapl:0", "energy_uj")
+        if is_readable(fallback):
+            paths.append(fallback)
+
+    return sorted(paths)
 
 
 def measure_idle_power(duration_sec: float = 2.0) -> float:
-    """Measures the average idle power consumption of the CPU PKG domain.
+    """Measures the average idle power consumption of all detected CPU PKG domains.
 
-    Reads the starting energy value from RAPL, sleeps for the specified
-    duration, reads the final energy value, and calculates the average power
+    Reads starting energy values from all sockets, sleeps for the specified
+    duration, reads final energy values, and calculates the total average power
     in Watts.
 
     Args:
@@ -67,55 +65,58 @@ def measure_idle_power(duration_sec: float = 2.0) -> float:
             window. Defaults to 2.0.
 
     Returns:
-        float: Average idle power consumption in Watts (W).
+        float: Total average idle power consumption in Watts (W) across all sockets.
 
     Raises:
-        RuntimeError: If the RAPL path is not found, readable, or if a
-            counter rollover occurs during measurement.
+        RuntimeError: If no RAPL paths are found, or if a counter rollover occurs.
     """
-    energy_path = find_pkg_energy_path()
-    if not energy_path:
+    energy_paths = find_pkg_energy_paths()
+    if not energy_paths:
         raise RuntimeError(
-            "Intel RAPL PKG energy path could not be found or is not readable."
+            "Intel RAPL PKG energy paths could not be found or are not readable."
         )
 
-    # Read initial energy value
+    e0_list = []
+    # Read initial energy values from all sockets
     try:
         t0 = time.perf_counter()
-        with open(energy_path, "r") as f:
-            e0 = int(f.read().strip())
+        for path in energy_paths:
+            with open(path, "r") as f:
+                e0_list.append(int(f.read().strip()))
     except Exception as e:
         raise RuntimeError(
-            f"Failed to read initial energy from {energy_path}: {e}"
+            f"Failed to read initial energy: {e}"
         )
 
     # Let the system remain in idle state during the window
     time.sleep(duration_sec)
 
-    # Read final energy value
+    e1_list = []
+    # Read final energy values from all sockets
     try:
         t1 = time.perf_counter()
-        with open(energy_path, "r") as f:
-            e1 = int(f.read().strip())
+        for path in energy_paths:
+            with open(path, "r") as f:
+                e1_list.append(int(f.read().strip()))
     except Exception as e:
         raise RuntimeError(
-            f"Failed to read final energy from {energy_path}: {e}"
+            f"Failed to read final energy: {e}"
         )
 
     elapsed = t1 - t0
     if elapsed <= 0.0:
         return 0.0
 
-    # energy_uj is in microjoules. Convert to Joules: 1 microjoule = 1e-6 Joules
-    energy_j = (e1 - e0) / 1e6
+    energy_total_j = 0.0
+    for i in range(len(energy_paths)):
+        diff = (e1_list[i] - e0_list[i]) / 1e6
+        if diff < 0:
+            raise RuntimeError(
+                "RAPL energy counter rollover detected during idle measurement."
+            )
+        energy_total_j += diff
 
-    # Handle counter rollover
-    if energy_j < 0:
-        raise RuntimeError(
-            "RAPL energy counter rollover detected during idle measurement."
-        )
-
-    return energy_j / elapsed
+    return energy_total_j / elapsed
 
 
 if __name__ == "__main__":
