@@ -99,6 +99,145 @@ def _get_data_bank_manager_cls():
         _DATA_BANK_MANAGER_MODULE = mod
     return _DATA_BANK_MANAGER_MODULE.DataBankManager
 
+from typing import List, Iterator
+
+
+class RLWorkloadGenerator:
+    """Generador de tamaños de carga de trabajo para entrenamiento de Reinforcement Learning.
+
+    Soporta los algoritmos de GEMM (híbrido por rangos) y FFT (lineal denso para romper potencias de 2).
+    """
+
+    def __init__(
+        self,
+        algorithm: str,
+        gemm_min_n: int = 64,
+        gemm_max_n: int = 8192,
+        gemm_low_step: int = 128,
+        gemm_trans_step: int = 512,
+        gemm_high_step: int = 1024,
+        fft_min_n: int = 1024,
+        fft_max_n: int = 8192,
+        fft_low_step: int = 128,
+        fft_mid_step: int = 4096,
+        fft_high_step: int = 262144,
+    ) -> None:
+        """Inicializa el generador con los parámetros de crecimiento específicos.
+
+        Args:
+            algorithm (str): Algoritmo objetivo ('gemm' o 'fft').
+            gemm_min_n (int, optional): Límite inferior para GEMM. Defaults to 64.
+            gemm_max_n (int, optional): Límite superior para GEMM. Defaults to 8192.
+            gemm_low_step (int, optional): Incremento en rango de baja latencia. Defaults to 128.
+            gemm_trans_step (int, optional): Incremento en rango de transición. Defaults to 512.
+            gemm_high_step (int, optional): Incremento en rango intensivo. Defaults to 1024.
+            fft_min_n (int, optional): Límite inferior para FFT. Defaults to 1024.
+            fft_max_n (int, optional): Límite superior para FFT. Defaults to 8192.
+            fft_low_step (int, optional): Incremento en rango de baja latencia/overhead de FFT. Defaults to 128.
+            fft_mid_step (int, optional): Incremento en rango de transición de FFT. Defaults to 4096.
+            fft_high_step (int, optional): Incremento en rango intensivo de FFT. Defaults to 262144.
+
+        Raises:
+            ValueError: Si el algoritmo especificado no está soportado o si algún paso es inválido.
+        """
+        algo_lower = algorithm.lower()
+        if algo_lower not in {"gemm", "fft"}:
+            raise ValueError(f"Algoritmo '{algorithm}' no soportado. Debe ser 'gemm' o 'fft'.")
+
+        if gemm_low_step not in {64, 128}:
+            raise ValueError("gemm_low_step debe ser 64 o 128.")
+        if gemm_trans_step not in {256, 512}:
+            raise ValueError("gemm_trans_step debe ser 256 o 512.")
+        if fft_low_step not in {64, 128}:
+            raise ValueError("fft_low_step debe ser 64 o 128.")
+
+        self.algorithm = algo_lower
+        self.gemm_min_n = gemm_min_n
+        self.gemm_max_n = gemm_max_n
+        self.gemm_low_step = gemm_low_step
+        self.gemm_trans_step = gemm_trans_step
+        self.gemm_high_step = gemm_high_step
+        self.fft_min_n = fft_min_n
+        self.fft_max_n = fft_max_n
+        self.fft_low_step = fft_low_step
+        self.fft_mid_step = fft_mid_step
+        self.fft_high_step = fft_high_step
+
+    def generate(self) -> List[int]:
+        """Genera la lista ordenada de tamaños N de acuerdo con el algoritmo seleccionado.
+
+        Returns:
+            List[int]: Lista con los tamaños exactos de N.
+        """
+        if self.algorithm == "gemm":
+            return self._generate_gemm()
+        return self._generate_fft()
+
+    def __iter__(self) -> Iterator[int]:
+        """Permite iterar directamente sobre el generador.
+
+        Returns:
+            Iterator[int]: Iterador sobre la lista de tamaños generados.
+        """
+        return iter(self.generate())
+
+    def _generate_gemm(self) -> List[int]:
+        """Genera la lista de tamaños N para GEMM usando la estrategia híbrida por rangos.
+
+        Returns:
+            List[int]: Lista de tamaños para GEMM.
+        """
+        sizes: List[int] = []
+
+        # Rango 1: Baja latencia (64 <= N <= 1024)
+        n = self.gemm_min_n
+        while n <= 1024 and n <= self.gemm_max_n:
+            sizes.append(n)
+            n += self.gemm_low_step
+
+        # Rango 2: Transición (1025 <= N <= 4096)
+        n = 1024 + self.gemm_trans_step
+        while n <= 4096 and n <= self.gemm_max_n:
+            sizes.append(n)
+            n += self.gemm_trans_step
+
+        # Rango 3: Cómputo Intensivo (N > 4096 hasta gemm_max_n)
+        n = 4096 + self.gemm_high_step
+        while n <= self.gemm_max_n:
+            sizes.append(n)
+            n += self.gemm_high_step
+
+        return sizes
+
+    def _generate_fft(self) -> List[int]:
+        """Genera la lista de tamaños N para FFT usando la estrategia lineal densa progresiva.
+
+        Returns:
+            List[int]: Lista de tamaños para FFT.
+        """
+        sizes: List[int] = []
+
+        # Rango 1: Baja latencia / overhead (1024 <= N <= 16384)
+        n = self.fft_min_n
+        while n <= 16384 and n <= self.fft_max_n:
+            sizes.append(n)
+            n += self.fft_low_step
+
+        # Rango 2: Transición (16385 <= N <= 262144)
+        n = 16384 + self.fft_mid_step
+        while n <= 262144 and n <= self.fft_max_n:
+            sizes.append(n)
+            n += self.fft_mid_step
+
+        # Rango 3: Cómputo/Memoria Intensiva (N > 262144 hasta fft_max_n)
+        n = 262144 + self.fft_high_step
+        while n <= self.fft_max_n:
+            sizes.append(n)
+            n += self.fft_high_step
+
+        return sizes
+
+
 # Expresion regular para extraer el tiempo reportado por el binario CUDA.
 TIME_PATTERN = re.compile(r"Time_sec=([0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)")
 FFT_TIME_PATTERN = re.compile(
@@ -1306,7 +1445,18 @@ def run_gemm(args):
     if args.gemm_warmup < 0:
         raise ValueError("--gemm-warmup no puede ser negativo")
 
-    sizes = parse_sizes(args.sizes)
+    if args.mode == "continuous-rl":
+        generator = RLWorkloadGenerator(
+            algorithm="gemm",
+            gemm_min_n=args.gemm_min_n,
+            gemm_max_n=args.gemm_max_n,
+            gemm_low_step=args.gemm_low_step,
+            gemm_trans_step=args.gemm_trans_step,
+            gemm_high_step=args.gemm_high_step,
+        )
+        sizes = generator.generate()
+    else:
+        sizes = parse_sizes(args.sizes)
     precisions = parse_precisions(args.precisions)
     if args.sweep_transpose:
         op_a_list = parse_ops(args.op_a_list)
@@ -1448,12 +1598,24 @@ def run_gemm(args):
 
 
 def run_fft(args):
-    sizes_1d = parse_fft_shapes(args.fft_sizes_1d, 1)
-    sizes_2d = parse_fft_shapes(args.fft_sizes_2d, 2)
-    sizes_3d = parse_fft_shapes(args.fft_sizes_3d, 3)
-    shapes = sizes_1d + sizes_2d + sizes_3d
-    if not shapes:
-        raise ValueError("No se definieron tamanos FFT (1D/2D/3D)")
+    if args.mode == "continuous-rl":
+        generator = RLWorkloadGenerator(
+            algorithm="fft",
+            fft_min_n=args.fft_min_n,
+            fft_max_n=args.fft_max_n,
+            fft_low_step=args.fft_low_step,
+            fft_mid_step=args.fft_mid_step,
+            fft_high_step=args.fft_high_step,
+        )
+        sizes = generator.generate()
+        shapes = [(n, 0, 0) for n in sizes]
+    else:
+        sizes_1d = parse_fft_shapes(args.fft_sizes_1d, 1)
+        sizes_2d = parse_fft_shapes(args.fft_sizes_2d, 2)
+        sizes_3d = parse_fft_shapes(args.fft_sizes_3d, 3)
+        shapes = sizes_1d + sizes_2d + sizes_3d
+        if not shapes:
+            raise ValueError("No se definieron tamanos FFT (1D/2D/3D)")
 
     batches = parse_int_list(args.fft_batches, "batches")
     precisions = parse_fft_precisions(args.fft_precisions)
@@ -1633,6 +1795,75 @@ def main():
         choices=["gemm", "fft"],
         default="gemm",
         help="Selecciona el benchmark a ejecutar (gemm|fft)",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["standard", "continuous-rl"],
+        default="standard",
+        help="Modo de ejecucion del benchmark (standard|continuous-rl)",
+    )
+    parser.add_argument(
+        "--gemm-min-n",
+        type=int,
+        default=64,
+        help="Limite inferior para GEMM en modo continuous-rl (por defecto: 64)",
+    )
+    parser.add_argument(
+        "--gemm-max-n",
+        type=int,
+        default=8192,
+        help="Limite superior para GEMM en modo continuous-rl (por defecto: 8192)",
+    )
+    parser.add_argument(
+        "--gemm-low-step",
+        type=int,
+        choices=[64, 128],
+        default=128,
+        help="Paso en rango de baja latencia para GEMM en modo continuous-rl (64|128, por defecto: 128)",
+    )
+    parser.add_argument(
+        "--gemm-trans-step",
+        type=int,
+        choices=[256, 512],
+        default=512,
+        help="Paso en rango de transicion para GEMM en modo continuous-rl (256|512, por defecto: 512)",
+    )
+    parser.add_argument(
+        "--gemm-high-step",
+        type=int,
+        default=1024,
+        help="Paso en rango intensivo para GEMM en modo continuous-rl (por defecto: 1024)",
+    )
+    parser.add_argument(
+        "--fft-min-n",
+        type=int,
+        default=1024,
+        help="Limite inferior para FFT en modo continuous-rl (por defecto: 1024)",
+    )
+    parser.add_argument(
+        "--fft-max-n",
+        type=int,
+        default=8192,
+        help="Limite superior para FFT en modo continuous-rl (por defecto: 8192)",
+    )
+    parser.add_argument(
+        "--fft-low-step",
+        type=int,
+        choices=[64, 128],
+        default=128,
+        help="Paso en rango de baja latencia para FFT en modo continuous-rl (64|128, por defecto: 128)",
+    )
+    parser.add_argument(
+        "--fft-mid-step",
+        type=int,
+        default=4096,
+        help="Paso en rango de transicion para FFT en modo continuous-rl (por defecto: 4096)",
+    )
+    parser.add_argument(
+        "--fft-high-step",
+        type=int,
+        default=262144,
+        help="Paso en rango intensivo para FFT en modo continuous-rl (por defecto: 262144)",
     )
     parser.add_argument("--gemm-binary-cpu", default="./algoritmos/gemm_cpu", help="Ruta al binario GEMM CPU (BLAS)")
     parser.add_argument("--gemm-binary-gpu", default="./algoritmos/gemm_gpu", help="Ruta al binario GEMM GPU (cuBLAS)")
