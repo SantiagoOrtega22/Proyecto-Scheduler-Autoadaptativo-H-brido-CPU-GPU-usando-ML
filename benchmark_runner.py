@@ -1458,12 +1458,11 @@ def run_gemm(args):
     else:
         sizes = parse_sizes(args.sizes)
     precisions = parse_precisions(args.precisions)
-    if args.sweep_transpose:
-        op_a_list = parse_ops(args.op_a_list)
-        op_b_list = parse_ops(args.op_b_list)
-    else:
-        op_a_list = ["N"]
-        op_b_list = ["N"]
+    default_op = "N,T,C" if (args.mode == "continuous-rl" or args.sweep_transpose) else "N"
+    raw_op_a = args.op_a_list if args.op_a_list is not None else default_op
+    raw_op_b = args.op_b_list if args.op_b_list is not None else default_op
+    op_a_list = parse_ops(raw_op_a)
+    op_b_list = parse_ops(raw_op_b)
 
     output_path = args.output or "benchmark_results.csv"
 
@@ -1896,12 +1895,12 @@ def main():
     )
     parser.add_argument(
         "--op-a-list",
-        default="N",
+        default=None,
         help="Lista separada por comas para opA: N,T,C (GEMM)",
     )
     parser.add_argument(
         "--op-b-list",
-        default="N",
+        default=None,
         help="Lista separada por comas para opB: N,T,C (GEMM)",
     )
     parser.add_argument("--gpu-index", type=int, default=0, help="Indice de GPU para NVML")
