@@ -111,14 +111,14 @@ class RLWorkloadGenerator:
     def __init__(
         self,
         algorithm: str,
-        gemm_min_n: int = 64,
-        gemm_max_n: int = 8192,
-        gemm_low_step: int = 128,
+        gemm_min_n: int = 512,
+        gemm_max_n: int = 16384,
+        gemm_low_step: int = 32,
         gemm_trans_step: int = 512,
         gemm_high_step: int = 1024,
-        fft_min_n: int = 1024,
-        fft_max_n: int = 8192,
-        fft_low_step: int = 128,
+        fft_min_n: int = 16384,
+        fft_max_n: int = 67108864,
+        fft_low_step: int = 256,
         fft_mid_step: int = 4096,
         fft_high_step: int = 262144,
     ) -> None:
@@ -126,16 +126,16 @@ class RLWorkloadGenerator:
 
         Args:
             algorithm (str): Algoritmo objetivo ('gemm' o 'fft').
-            gemm_min_n (int, optional): Límite inferior para GEMM. Defaults to 64.
-            gemm_max_n (int, optional): Límite superior para GEMM. Defaults to 8192.
-            gemm_low_step (int, optional): Incremento en rango de baja latencia. Defaults to 128.
-            gemm_trans_step (int, optional): Incremento en rango de transición. Defaults to 512.
-            gemm_high_step (int, optional): Incremento en rango intensivo. Defaults to 1024.
-            fft_min_n (int, optional): Límite inferior para FFT. Defaults to 1024.
-            fft_max_n (int, optional): Límite superior para FFT. Defaults to 8192.
-            fft_low_step (int, optional): Incremento en rango de baja latencia/overhead de FFT. Defaults to 128.
-            fft_mid_step (int, optional): Incremento en rango de transición de FFT. Defaults to 4096.
-            fft_high_step (int, optional): Incremento en rango intensivo de FFT. Defaults to 262144.
+            gemm_min_n (int, optional): Límite inferior para GEMM. Defaults to 512.
+            gemm_max_n (int, optional): Límite superior para GEMM. Defaults to 16384.
+            gemm_low_step (int, optional): Incremento en rango de baja latencia. Defaults to 32.
+            gemm_trans_step (int, optional): Paso de transición (ignorado, por compatibilidad).
+            gemm_high_step (int, optional): Paso intensivo (ignorado, por compatibilidad).
+            fft_min_n (int, optional): Límite inferior para FFT. Defaults to 16384.
+            fft_max_n (int, optional): Límite superior para FFT. Defaults to 67108864.
+            fft_low_step (int, optional): Incremento base para FFT. Defaults to 256.
+            fft_mid_step (int, optional): Paso medio (ignorado, por compatibilidad).
+            fft_high_step (int, optional): Paso alto (ignorado, por compatibilidad).
 
         Raises:
             ValueError: Si el algoritmo especificado no está soportado o si algún paso es inválido.
@@ -144,12 +144,10 @@ class RLWorkloadGenerator:
         if algo_lower not in {"gemm", "fft"}:
             raise ValueError(f"Algoritmo '{algorithm}' no soportado. Debe ser 'gemm' o 'fft'.")
 
-        if gemm_low_step not in {64, 128}:
-            raise ValueError("gemm_low_step debe ser 64 o 128.")
-        if gemm_trans_step not in {256, 512}:
-            raise ValueError("gemm_trans_step debe ser 256 o 512.")
-        if fft_low_step not in {64, 128}:
-            raise ValueError("fft_low_step debe ser 64 o 128.")
+        if gemm_low_step not in {32, 64, 128}:
+            raise ValueError("gemm_low_step debe ser 32, 64 o 128.")
+        if fft_low_step not in {128, 256, 512}:
+            raise ValueError("fft_low_step debe ser 128, 256 o 512.")
 
         self.algorithm = algo_lower
         self.gemm_min_n = gemm_min_n
@@ -188,25 +186,14 @@ class RLWorkloadGenerator:
             List[int]: Lista de tamaños para GEMM.
         """
         sizes: List[int] = []
-
-        # Rango 1: Baja latencia (64 <= N <= 1024)
         n = self.gemm_min_n
-        while n <= 1024 and n <= self.gemm_max_n:
-            sizes.append(n)
-            n += self.gemm_low_step
-
-        # Rango 2: Transición (1025 <= N <= 4096)
-        n = 1024 + self.gemm_trans_step
-        while n <= 4096 and n <= self.gemm_max_n:
-            sizes.append(n)
-            n += self.gemm_trans_step
-
-        # Rango 3: Cómputo Intensivo (N > 4096 hasta gemm_max_n)
-        n = 4096 + self.gemm_high_step
         while n <= self.gemm_max_n:
             sizes.append(n)
-            n += self.gemm_high_step
-
+            k = n.bit_length() - 1
+            # El paso empieza en self.gemm_low_step para 2^9 (512) y aumenta 2x por cada potencia de 2
+            exponent = max(0, k - 9)
+            base_step = self.gemm_low_step * (2 ** exponent)
+            n += base_step
         return sizes
 
     def _generate_fft(self) -> List[int]:
@@ -216,24 +203,28 @@ class RLWorkloadGenerator:
             List[int]: Lista de tamaños para FFT.
         """
         sizes: List[int] = []
+        p_start = (self.fft_min_n).bit_length() - 1
+        p_end = (self.fft_max_n - 1).bit_length()
 
-        # Rango 1: Baja latencia / overhead (1024 <= N <= 16384)
-        n = self.fft_min_n
-        while n <= 16384 and n <= self.fft_max_n:
-            sizes.append(n)
-            n += self.fft_low_step
+        for p in range(p_start, p_end):
+            interval_start = max(2**p, self.fft_min_n)
+            interval_end = 2**(p+1)
 
-        # Rango 2: Transición (16385 <= N <= 262144)
-        n = 16384 + self.fft_mid_step
-        while n <= 262144 and n <= self.fft_max_n:
-            sizes.append(n)
-            n += self.fft_mid_step
+            exponent = max(0, p - 14)
+            base_step = self.fft_low_step * (2 ** exponent)
 
-        # Rango 3: Cómputo/Memoria Intensiva (N > 262144 hasta fft_max_n)
-        n = 262144 + self.fft_high_step
-        while n <= self.fft_max_n:
-            sizes.append(n)
-            n += self.fft_high_step
+            n = interval_start
+            step_count = 0
+            while n < interval_end and n <= self.fft_max_n:
+                sizes.append(n)
+                if step_count % 2 == 0:
+                    n += base_step
+                else:
+                    n += base_step + 67
+                step_count += 1
+
+        if 2**p_end <= self.fft_max_n and 2**p_end >= self.fft_min_n:
+            sizes.append(2**p_end)
 
         return sizes
 
@@ -250,7 +241,7 @@ POWER_SAMPLE_INTERVAL_SEC = 0.02
 IDLE_POWER_CPU = 0.0
 
 DEFAULT_DATABANK_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bench_files", "databank")
-DEFAULT_DATABANK_MAX_N = 8192
+DEFAULT_DATABANK_MAX_N = 67108864
 
 DEFAULT_BENCHMARK_BANK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bench_files", "benchmark_bank.h5")
 
@@ -1804,53 +1795,52 @@ def main():
     parser.add_argument(
         "--gemm-min-n",
         type=int,
-        default=64,
-        help="Limite inferior para GEMM en modo continuous-rl (por defecto: 64)",
+        default=512,
+        help="Limite inferior para GEMM en modo continuous-rl (por defecto: 512)",
     )
     parser.add_argument(
         "--gemm-max-n",
         type=int,
-        default=8192,
-        help="Limite superior para GEMM en modo continuous-rl (por defecto: 8192)",
+        default=16384,
+        help="Limite superior para GEMM en modo continuous-rl (por defecto: 16384)",
     )
     parser.add_argument(
         "--gemm-low-step",
         type=int,
-        choices=[64, 128],
-        default=128,
-        help="Paso en rango de baja latencia para GEMM en modo continuous-rl (64|128, por defecto: 128)",
+        choices=[32, 64, 128],
+        default=32,
+        help="Paso base en rango de baja latencia para GEMM en modo continuous-rl (32|64|128, por defecto: 32)",
     )
     parser.add_argument(
         "--gemm-trans-step",
         type=int,
-        choices=[256, 512],
         default=512,
-        help="Paso en rango de transicion para GEMM en modo continuous-rl (256|512, por defecto: 512)",
+        help="Paso en rango de transicion para GEMM en modo continuous-rl (por defecto: 512, ignorado con dynamic steps)",
     )
     parser.add_argument(
         "--gemm-high-step",
         type=int,
         default=1024,
-        help="Paso en rango intensivo para GEMM en modo continuous-rl (por defecto: 1024)",
+        help="Paso en rango intensivo para GEMM en modo continuous-rl (por defecto: 1024, ignorado con dynamic steps)",
     )
     parser.add_argument(
         "--fft-min-n",
         type=int,
-        default=1024,
-        help="Limite inferior para FFT en modo continuous-rl (por defecto: 1024)",
+        default=16384,
+        help="Limite inferior para FFT en modo continuous-rl (por defecto: 16384)",
     )
     parser.add_argument(
         "--fft-max-n",
         type=int,
-        default=8192,
-        help="Limite superior para FFT en modo continuous-rl (por defecto: 8192)",
+        default=67108864,
+        help="Limite superior para FFT en modo continuous-rl (por defecto: 67108864)",
     )
     parser.add_argument(
         "--fft-low-step",
         type=int,
-        choices=[64, 128],
-        default=128,
-        help="Paso en rango de baja latencia para FFT en modo continuous-rl (64|128, por defecto: 128)",
+        choices=[128, 256, 512],
+        default=256,
+        help="Paso base en rango de baja latencia para FFT en modo continuous-rl (128|256|512, por defecto: 256)",
     )
     parser.add_argument(
         "--fft-mid-step",

@@ -60,41 +60,73 @@ _REAL_PART: dict = {
 
 # ── Generación de la lista de tamaños ─────────────────────────────────────────
 
-def generate_size_sweep(max_n: int = 8192) -> List[int]:
-    """Genera la lista de tamaños N según la estrategia de 3 rangos.
+def generate_size_sweep(max_n: Optional[int] = None, algorithm: str = "gemm") -> List[int]:
+    """Genera la lista de tamaños N de acuerdo al algoritmo y el rango especificado.
 
-    Rangos:
-        Baja latencia   (64..1024):  paso +128   — modela overhead PCIe.
-        Transición    (1025..4096):  paso +512.
-        Cómputo intensivo  (>4096):  paso +1024  — hasta max_n.
+    Para GEMM:
+        Empieza desde 512 (2^9) a 2^14 (16384) con saltos desde +32 (en el rango de 2^10) 
+        y un aumento de 2x por cada potencia de 2 (el rango [512, 1024) tiene salto de +16).
+
+    Para FFT:
+        Empieza desde 2^14 (16384) a 2^26 (67108864) con saltos desde +256 y un aumento de 2x
+        por cada potencia de 2, intercalando en cada salto una desalineación de +67.
 
     Args:
-        max_n: Techo del rango compute-intensive (limitado por VRAM/RAM).
+        max_n: Techo opcional del barrido. Si es None, usa el máximo natural
+               del algoritmo (16384 para GEMM, 67108864 para FFT).
+        algorithm: Algoritmo objetivo ('gemm' o 'fft').
 
     Returns:
         List[int]: Lista ordenada de tamaños N.
     """
-    sizes: List[int] = []
+    import math
 
-    # Rango 1: baja latencia
-    n = 64
-    while n <= 1024:
-        sizes.append(n)
-        n += 128
+    algo_lower = algorithm.lower()
+    if algo_lower == "gemm":
+        limit_n = min(max_n, 16384) if max_n is not None else 16384
+        sizes: List[int] = []
+        # GEMM empieza desde 512 (2^9) hasta limit_n
+        n = 512
+        while n <= limit_n:
+            sizes.append(n)
+            # Determinar exponente de potencia de 2 (k tal que 2^k <= n < 2^(k+1))
+            k = n.bit_length() - 1
+            # El paso empieza en +32 para 2^9 (512) y aumenta 2x por cada potencia de 2
+            exponent = max(0, k - 9)
+            base_step = 32 * (2 ** exponent)
+            n += base_step
+        return sizes
 
-    # Rango 2: transición
-    n = 1536
-    while n <= 4096:
-        sizes.append(n)
-        n += 512
-
-    # Rango 3: cómputo intensivo
-    n = 5120
-    while n <= max_n:
-        sizes.append(n)
-        n += 1024
-
-    return sizes
+    elif algo_lower == "fft":
+        limit_n = min(max_n, 67108864) if max_n is not None else 67108864
+        sizes: List[int] = []
+        # FFT empieza desde 2^14 (16384) hasta limit_n
+        p_start = 14
+        p_end = (limit_n - 1).bit_length()
+        
+        for p in range(p_start, p_end):
+            interval_start = max(2**p, 16384)
+            interval_end = 2**(p+1)
+            
+            exponent = max(0, p - 14)
+            base_step = 256 * (2 ** exponent)
+            
+            n = interval_start
+            step_count = 0
+            while n < interval_end and n <= limit_n:
+                sizes.append(n)
+                if step_count % 2 == 0:
+                    n += base_step
+                else:
+                    n += base_step + 67
+                step_count += 1
+                
+        if 2**p_end <= limit_n:
+            sizes.append(2**p_end)
+            
+        return sizes
+    else:
+        raise ValueError(f"Algoritmo '{algorithm}' no soportado. Debe ser 'gemm' o 'fft'.")
 
 
 # ── Clase principal ───────────────────────────────────────────────────────────
@@ -116,7 +148,7 @@ class DataBankManager:
         self,
         base_dir: str = "bench_files/databank",
         seed: int = SEED,
-        max_n: int = 8192,
+        max_n: Optional[int] = None,
     ) -> None:
         """Inicializa el DataBankManager.
 
@@ -428,9 +460,16 @@ class DataBankManager:
 
     # ── Utilidades de precarga ─────────────────────────────────────────────────
 
-    def generate_size_sweep(self) -> List[int]:
-        """Devuelve la lista completa de N para el sweep DQN."""
-        return generate_size_sweep(self.max_n)
+    def generate_size_sweep(self, algorithm: str = "gemm") -> List[int]:
+        """Devuelve la lista completa de N para el sweep DQN.
+
+        Args:
+            algorithm: Algoritmo objetivo ('gemm' o 'fft').
+
+        Returns:
+            List[int]: Lista de tamaños N.
+        """
+        return generate_size_sweep(self.max_n, algorithm=algorithm)
 
     def preload_gemm(
         self,
@@ -445,7 +484,7 @@ class DataBankManager:
         """
         if precisions is None:
             precisions = ["S", "D", "C", "Z"]
-        sizes = self.generate_size_sweep()
+        sizes = self.generate_size_sweep(algorithm="gemm")
         total = len(sizes) * len(precisions)
         done = 0
         for n in sizes:
@@ -472,7 +511,7 @@ class DataBankManager:
             precisions = ["S", "D"]
         if domains is None:
             domains = ["C2C", "R2C", "C2R"]
-        sizes = self.generate_size_sweep()
+        sizes = self.generate_size_sweep(algorithm="fft")
         total = len(sizes) * len(precisions) * len(domains)
         done = 0
         for n in sizes:
@@ -594,7 +633,7 @@ if __name__ == "__main__":
     # Subcomando: preload
     p_pre = sub.add_parser("preload", help="Pre-genera el banco completo en disco")
     p_pre.add_argument("--base-dir", default="bench_files/databank")
-    p_pre.add_argument("--max-n", type=int, default=8192)
+    p_pre.add_argument("--max-n", type=int, default=None, help="Limite superior N (por defecto: 16384 para GEMM, 67108864 para FFT)")
     p_pre.add_argument("--algo", choices=["gemm", "fft", "all"], default="all")
 
     # Subcomando: stats
