@@ -654,7 +654,7 @@ static int run_sgemm_case(
 	CHECK_CUDA(cudaMalloc((void **)&d_b, b_bytes));
 	CHECK_CUDA(cudaMalloc((void **)&d_c, c_bytes));
 
-	// Copy input matrices once to GPU
+	// Copy input matrices once to GPU (for warm-up)
 	CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
 	CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
 	CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
@@ -670,8 +670,12 @@ static int run_sgemm_case(
 	int run_iters = *iters;
 	if (run_iters <= 0) {
 		double t0 = monotonic_time_sec();
+		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUBLAS(cublasSgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
 								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
+		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
 		CHECK_CUDA(cudaDeviceSynchronize());
 		double t1 = monotonic_time_sec();
 		double t1rep = t1 - t0;
@@ -681,16 +685,18 @@ static int run_sgemm_case(
 		*iters = run_iters;
 	}
 
+	CHECK_CUDA(cudaDeviceSynchronize());
 	double start = monotonic_time_sec();
 	for (int i = 0; i < run_iters; ++i) {
+		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUBLAS(cublasSgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
 								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
+		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
 	}
 	CHECK_CUDA(cudaDeviceSynchronize());
 	double end = monotonic_time_sec();
-
-	// Copy output matrix back to host
-	CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
 
 	*out_time_sec = (end - start) / (double)run_iters;
 
@@ -746,7 +752,7 @@ static int run_dgemm_case(
 	CHECK_CUDA(cudaMalloc((void **)&d_b, b_bytes));
 	CHECK_CUDA(cudaMalloc((void **)&d_c, c_bytes));
 
-	// Copy input matrices once to GPU
+	// Copy input matrices once to GPU (for warm-up)
 	CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
 	CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
 	CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
@@ -762,8 +768,12 @@ static int run_dgemm_case(
 	int run_iters = *iters;
 	if (run_iters <= 0) {
 		double t0 = monotonic_time_sec();
+		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUBLAS(cublasDgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
 								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
+		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
 		CHECK_CUDA(cudaDeviceSynchronize());
 		double t1 = monotonic_time_sec();
 		double t1rep = t1 - t0;
@@ -773,16 +783,18 @@ static int run_dgemm_case(
 		*iters = run_iters;
 	}
 
+	CHECK_CUDA(cudaDeviceSynchronize());
 	double start = monotonic_time_sec();
 	for (int i = 0; i < run_iters; ++i) {
+		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUBLAS(cublasDgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
 								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
+		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
 	}
 	CHECK_CUDA(cudaDeviceSynchronize());
 	double end = monotonic_time_sec();
-
-	// Copy output matrix back to host
-	CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
 
 	*out_time_sec = (end - start) / (double)run_iters;
 
@@ -838,7 +850,7 @@ static int run_cgemm_case(
 	CHECK_CUDA(cudaMalloc((void **)&d_b, b_bytes));
 	CHECK_CUDA(cudaMalloc((void **)&d_c, c_bytes));
 
-	// Copy input matrices once to GPU
+	// Copy input matrices once to GPU (for warm-up)
 	CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
 	CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
 	CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
@@ -854,8 +866,12 @@ static int run_cgemm_case(
 	int run_iters = *iters;
 	if (run_iters <= 0) {
 		double t0 = monotonic_time_sec();
+		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUBLAS(cublasCgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
 								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
+		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
 		CHECK_CUDA(cudaDeviceSynchronize());
 		double t1 = monotonic_time_sec();
 		double t1rep = t1 - t0;
@@ -865,16 +881,18 @@ static int run_cgemm_case(
 		*iters = run_iters;
 	}
 
+	CHECK_CUDA(cudaDeviceSynchronize());
 	double start = monotonic_time_sec();
 	for (int i = 0; i < run_iters; ++i) {
+		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUBLAS(cublasCgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
 								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
+		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
 	}
 	CHECK_CUDA(cudaDeviceSynchronize());
 	double end = monotonic_time_sec();
-
-	// Copy output matrix back to host
-	CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
 
 	*out_time_sec = (end - start) / (double)run_iters;
 
@@ -930,7 +948,7 @@ static int run_zgemm_case(
 	CHECK_CUDA(cudaMalloc((void **)&d_b, b_bytes));
 	CHECK_CUDA(cudaMalloc((void **)&d_c, c_bytes));
 
-	// Copy input matrices once to GPU
+	// Copy input matrices once to GPU (for warm-up)
 	CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
 	CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
 	CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
@@ -946,8 +964,12 @@ static int run_zgemm_case(
 	int run_iters = *iters;
 	if (run_iters <= 0) {
 		double t0 = monotonic_time_sec();
+		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUBLAS(cublasZgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
 								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
+		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
 		CHECK_CUDA(cudaDeviceSynchronize());
 		double t1 = monotonic_time_sec();
 		double t1rep = t1 - t0;
@@ -957,16 +979,18 @@ static int run_zgemm_case(
 		*iters = run_iters;
 	}
 
+	CHECK_CUDA(cudaDeviceSynchronize());
 	double start = monotonic_time_sec();
 	for (int i = 0; i < run_iters; ++i) {
+		CHECK_CUDA(cudaMemcpy(d_a, h_a, a_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_b, h_b, b_bytes, cudaMemcpyHostToDevice));
+		CHECK_CUDA(cudaMemcpy(d_c, h_c, c_bytes, cudaMemcpyHostToDevice));
 		CHECK_CUBLAS(cublasZgemm(handle, c_op_b, c_op_a, input->n, input->m, input->k,
 								 &alpha, d_b, input->n, d_a, input->k, &beta, d_c, input->n));
+		CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
 	}
 	CHECK_CUDA(cudaDeviceSynchronize());
 	double end = monotonic_time_sec();
-
-	// Copy output matrix back to host
-	CHECK_CUDA(cudaMemcpy(h_c, d_c, c_bytes, cudaMemcpyDeviceToHost));
 
 	*out_time_sec = (end - start) / (double)run_iters;
 

@@ -1236,6 +1236,9 @@ def run_single_case_fft(
     else:
         time_sec = float(match.group(2)) / 1e3
 
+    if time_sec <= 0.0:
+        time_sec = 1e-9
+
     # 3. Power Monitoring Execution (Segunda ejecucion con monitor activo)
     K = min(20000, max(1, round(0.15 / time_sec)))
     cmd_pwr = list(cmd)

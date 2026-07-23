@@ -467,7 +467,7 @@ static void benchmark_fft_float(const FftConfig *cfg) {
             CHECK_CUDA(cudaMalloc(&d_out, sizeof(cufftComplex) * total_real));
         }
 
-        // Copy input to device
+        // Copy input to device (initial copy for warm-up)
         CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftComplex) * total_real, cudaMemcpyHostToDevice));
         CHECK_CUDA(cudaDeviceSynchronize());
 
@@ -480,7 +480,9 @@ static void benchmark_fft_float(const FftConfig *cfg) {
         int run_iters = iters;
         if (run_iters <= 0) {
             double t0 = monotonic_time_sec();
+            CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftComplex) * total_real, cudaMemcpyHostToDevice));
             CHECK_CUFFT(cufftExecC2C(plan, d_in, d_out, dir));
+            CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(cufftComplex) * total_real, cudaMemcpyDeviceToHost));
             CHECK_CUDA(cudaDeviceSynchronize());
             double t1 = monotonic_time_sec();
             double t1rep = t1 - t0;
@@ -489,15 +491,16 @@ static void benchmark_fft_float(const FftConfig *cfg) {
             if (run_iters > 20000) run_iters = 20000;
         }
 
+        CHECK_CUDA(cudaDeviceSynchronize());
         double start_time = monotonic_time_sec();
         for (int i = 0; i < run_iters; ++i) {
+            CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftComplex) * total_real, cudaMemcpyHostToDevice));
             CHECK_CUFFT(cufftExecC2C(plan, d_in, d_out, dir));
+            CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(cufftComplex) * total_real, cudaMemcpyDeviceToHost));
         }
         CHECK_CUDA(cudaDeviceSynchronize());
         double end_time = monotonic_time_sec();
 
-        // Copy output back to host
-        CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(cufftComplex) * total_real, cudaMemcpyDeviceToHost));
         double time_sec = (end_time - start_time) / (double)run_iters;
         double gflops = flops / (time_sec * 1e9);
 
@@ -545,7 +548,7 @@ static void benchmark_fft_float(const FftConfig *cfg) {
             CHECK_CUDA(cudaMalloc(&d_out, sizeof(cufftComplex) * total_complex));
         }
 
-        // Copy input to device
+        // Copy input to device (initial copy for warm-up)
         CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(float) * total_real, cudaMemcpyHostToDevice));
         CHECK_CUDA(cudaDeviceSynchronize());
 
@@ -558,7 +561,9 @@ static void benchmark_fft_float(const FftConfig *cfg) {
         int run_iters = iters;
         if (run_iters <= 0) {
             double t0 = monotonic_time_sec();
+            CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(float) * total_real, cudaMemcpyHostToDevice));
             CHECK_CUFFT(cufftExecR2C(plan, d_in, d_out));
+            CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(cufftComplex) * total_complex, cudaMemcpyDeviceToHost));
             CHECK_CUDA(cudaDeviceSynchronize());
             double t1 = monotonic_time_sec();
             double t1rep = t1 - t0;
@@ -567,15 +572,16 @@ static void benchmark_fft_float(const FftConfig *cfg) {
             if (run_iters > 20000) run_iters = 20000;
         }
 
+        CHECK_CUDA(cudaDeviceSynchronize());
         double start_time = monotonic_time_sec();
         for (int i = 0; i < run_iters; ++i) {
+            CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(float) * total_real, cudaMemcpyHostToDevice));
             CHECK_CUFFT(cufftExecR2C(plan, d_in, d_out));
+            CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(cufftComplex) * total_complex, cudaMemcpyDeviceToHost));
         }
         CHECK_CUDA(cudaDeviceSynchronize());
         double end_time = monotonic_time_sec();
 
-        // Copy output back to host
-        CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(cufftComplex) * total_complex, cudaMemcpyDeviceToHost));
         double time_sec = (end_time - start_time) / (double)run_iters;
         double gflops = flops / (time_sec * 1e9);
 
@@ -619,7 +625,7 @@ static void benchmark_fft_float(const FftConfig *cfg) {
             CHECK_CUDA(cudaMalloc(&d_out, sizeof(float) * total_real));
         }
 
-        // Copy input to device
+        // Copy input to device (initial copy for warm-up)
         CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftComplex) * total_complex, cudaMemcpyHostToDevice));
         CHECK_CUDA(cudaDeviceSynchronize());
 
@@ -632,7 +638,9 @@ static void benchmark_fft_float(const FftConfig *cfg) {
         int run_iters = iters;
         if (run_iters <= 0) {
             double t0 = monotonic_time_sec();
+            CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftComplex) * total_complex, cudaMemcpyHostToDevice));
             CHECK_CUFFT(cufftExecC2R(plan, d_in, d_out));
+            CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(float) * total_real, cudaMemcpyDeviceToHost));
             CHECK_CUDA(cudaDeviceSynchronize());
             double t1 = monotonic_time_sec();
             double t1rep = t1 - t0;
@@ -641,15 +649,16 @@ static void benchmark_fft_float(const FftConfig *cfg) {
             if (run_iters > 20000) run_iters = 20000;
         }
 
+        CHECK_CUDA(cudaDeviceSynchronize());
         double start_time = monotonic_time_sec();
         for (int i = 0; i < run_iters; ++i) {
+            CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftComplex) * total_complex, cudaMemcpyHostToDevice));
             CHECK_CUFFT(cufftExecC2R(plan, d_in, d_out));
+            CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(float) * total_real, cudaMemcpyDeviceToHost));
         }
         CHECK_CUDA(cudaDeviceSynchronize());
         double end_time = monotonic_time_sec();
 
-        // Copy output back to host
-        CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(float) * total_real, cudaMemcpyDeviceToHost));
         double time_sec = (end_time - start_time) / (double)run_iters;
         double gflops = flops / (time_sec * 1e9);
 
@@ -770,7 +779,7 @@ static void benchmark_fft_double(const FftConfig *cfg) {
             CHECK_CUDA(cudaMalloc(&d_out, sizeof(cufftDoubleComplex) * total_real));
         }
 
-        // Copy input to device
+        // Copy input to device (initial copy for warm-up)
         CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftDoubleComplex) * total_real, cudaMemcpyHostToDevice));
         CHECK_CUDA(cudaDeviceSynchronize());
 
@@ -783,7 +792,9 @@ static void benchmark_fft_double(const FftConfig *cfg) {
         int run_iters = iters;
         if (run_iters <= 0) {
             double t0 = monotonic_time_sec();
+            CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftDoubleComplex) * total_real, cudaMemcpyHostToDevice));
             CHECK_CUFFT(cufftExecZ2Z(plan, d_in, d_out, dir));
+            CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(cufftDoubleComplex) * total_real, cudaMemcpyDeviceToHost));
             CHECK_CUDA(cudaDeviceSynchronize());
             double t1 = monotonic_time_sec();
             double t1rep = t1 - t0;
@@ -792,15 +803,16 @@ static void benchmark_fft_double(const FftConfig *cfg) {
             if (run_iters > 20000) run_iters = 20000;
         }
 
+        CHECK_CUDA(cudaDeviceSynchronize());
         double start_time = monotonic_time_sec();
         for (int i = 0; i < run_iters; ++i) {
+            CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftDoubleComplex) * total_real, cudaMemcpyHostToDevice));
             CHECK_CUFFT(cufftExecZ2Z(plan, d_in, d_out, dir));
+            CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(cufftDoubleComplex) * total_real, cudaMemcpyDeviceToHost));
         }
         CHECK_CUDA(cudaDeviceSynchronize());
         double end_time = monotonic_time_sec();
 
-        // Copy output back to host
-        CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(cufftDoubleComplex) * total_real, cudaMemcpyDeviceToHost));
         double time_sec = (end_time - start_time) / (double)run_iters;
         double gflops = flops / (time_sec * 1e9);
 
@@ -848,7 +860,7 @@ static void benchmark_fft_double(const FftConfig *cfg) {
             CHECK_CUDA(cudaMalloc(&d_out, sizeof(cufftDoubleComplex) * total_complex));
         }
 
-        // Copy input to device
+        // Copy input to device (initial copy for warm-up)
         CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(double) * total_real, cudaMemcpyHostToDevice));
         CHECK_CUDA(cudaDeviceSynchronize());
 
@@ -861,7 +873,9 @@ static void benchmark_fft_double(const FftConfig *cfg) {
         int run_iters = iters;
         if (run_iters <= 0) {
             double t0 = monotonic_time_sec();
+            CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(double) * total_real, cudaMemcpyHostToDevice));
             CHECK_CUFFT(cufftExecD2Z(plan, d_in, d_out));
+            CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(cufftDoubleComplex) * total_complex, cudaMemcpyDeviceToHost));
             CHECK_CUDA(cudaDeviceSynchronize());
             double t1 = monotonic_time_sec();
             double t1rep = t1 - t0;
@@ -870,15 +884,16 @@ static void benchmark_fft_double(const FftConfig *cfg) {
             if (run_iters > 20000) run_iters = 20000;
         }
 
+        CHECK_CUDA(cudaDeviceSynchronize());
         double start_time = monotonic_time_sec();
         for (int i = 0; i < run_iters; ++i) {
+            CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(double) * total_real, cudaMemcpyHostToDevice));
             CHECK_CUFFT(cufftExecD2Z(plan, d_in, d_out));
+            CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(cufftDoubleComplex) * total_complex, cudaMemcpyDeviceToHost));
         }
         CHECK_CUDA(cudaDeviceSynchronize());
         double end_time = monotonic_time_sec();
 
-        // Copy output back to host
-        CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(cufftDoubleComplex) * total_complex, cudaMemcpyDeviceToHost));
         double time_sec = (end_time - start_time) / (double)run_iters;
         double gflops = flops / (time_sec * 1e9);
 
@@ -922,7 +937,7 @@ static void benchmark_fft_double(const FftConfig *cfg) {
             CHECK_CUDA(cudaMalloc(&d_out, sizeof(double) * total_real));
         }
 
-        // Copy input to device
+        // Copy input to device (initial copy for warm-up)
         CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftDoubleComplex) * total_complex, cudaMemcpyHostToDevice));
         CHECK_CUDA(cudaDeviceSynchronize());
 
@@ -935,7 +950,9 @@ static void benchmark_fft_double(const FftConfig *cfg) {
         int run_iters = iters;
         if (run_iters <= 0) {
             double t0 = monotonic_time_sec();
+            CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftDoubleComplex) * total_complex, cudaMemcpyHostToDevice));
             CHECK_CUFFT(cufftExecZ2D(plan, d_in, d_out));
+            CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(double) * total_real, cudaMemcpyDeviceToHost));
             CHECK_CUDA(cudaDeviceSynchronize());
             double t1 = monotonic_time_sec();
             double t1rep = t1 - t0;
@@ -944,15 +961,16 @@ static void benchmark_fft_double(const FftConfig *cfg) {
             if (run_iters > 20000) run_iters = 20000;
         }
 
+        CHECK_CUDA(cudaDeviceSynchronize());
         double start_time = monotonic_time_sec();
         for (int i = 0; i < run_iters; ++i) {
+            CHECK_CUDA(cudaMemcpy(d_in, h_in, sizeof(cufftDoubleComplex) * total_complex, cudaMemcpyHostToDevice));
             CHECK_CUFFT(cufftExecZ2D(plan, d_in, d_out));
+            CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(double) * total_real, cudaMemcpyDeviceToHost));
         }
         CHECK_CUDA(cudaDeviceSynchronize());
         double end_time = monotonic_time_sec();
 
-        // Copy output back to host
-        CHECK_CUDA(cudaMemcpy(h_out, d_out, sizeof(double) * total_real, cudaMemcpyDeviceToHost));
         double time_sec = (end_time - start_time) / (double)run_iters;
         double gflops = flops / (time_sec * 1e9);
 
