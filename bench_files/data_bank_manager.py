@@ -67,14 +67,22 @@ def generate_size_sweep(max_n: Optional[int] = None, algorithm: str = "gemm") ->
         Empieza desde 512 (2^9) a 2^14 (16384) con saltos desde +32 (en el rango de 2^10) 
         y un aumento de 2x por cada potencia de 2 (el rango [512, 1024) tiene salto de +16).
 
-    Para FFT:
+    Para FFT 1D ('fft' o 'fft_1d'):
         Empieza desde 2^14 (16384) a 2^26 (67108864) con saltos desde +256 y un aumento de 2x
         por cada potencia de 2, intercalando en cada salto una desalineación de +67.
 
+    Para FFT 2D ('fft_2d'):
+        Rango de 16x16 (2^4) a 8192x8192 (2^13). Esquema de octavas con 32 puntos por octava.
+        El step dobla junto con el ancho de cada octava (k=4: step=1, k=5: step=1, k=6: step=2, ..., k=12: step=128).
+
+    Para FFT 3D ('fft_3d'):
+        Rango de 16x16x16 (2^4) a 256x256x256 (2^8). Mismo esquema de octavas.
+        (k=4: step=1, k=5: step=1, k=6: step=2, k=7: step=4).
+
     Args:
         max_n: Techo opcional del barrido. Si es None, usa el máximo natural
-               del algoritmo (16384 para GEMM, 67108864 para FFT).
-        algorithm: Algoritmo objetivo ('gemm' o 'fft').
+               del algoritmo (16384 para GEMM, 67108864 para FFT 1D, 8192 para 2D, 256 para 3D).
+        algorithm: Algoritmo objetivo ('gemm', 'fft'/'fft_1d', 'fft_2d', 'fft_3d').
 
     Returns:
         List[int]: Lista ordenada de tamaños N.
@@ -85,48 +93,80 @@ def generate_size_sweep(max_n: Optional[int] = None, algorithm: str = "gemm") ->
     if algo_lower == "gemm":
         limit_n = min(max_n, 16384) if max_n is not None else 16384
         sizes: List[int] = []
-        # GEMM empieza desde 512 (2^9) hasta limit_n
-        n = 512
-        while n <= limit_n:
-            sizes.append(n)
-            # Determinar exponente de potencia de 2 (k tal que 2^k <= n < 2^(k+1))
-            k = n.bit_length() - 1
-            # El paso empieza en +32 para 2^9 (512) y aumenta 2x por cada potencia de 2
-            exponent = max(0, k - 9)
-            base_step = 32 * (2 ** exponent)
-            n += base_step
-        return sizes
-
-    elif algo_lower == "fft":
-        limit_n = min(max_n, 67108864) if max_n is not None else 67108864
-        sizes: List[int] = []
-        # FFT empieza desde 2^14 (16384) hasta limit_n
-        p_start = 14
-        p_end = (limit_n - 1).bit_length()
+        puntos_por_octava = 32
+        k_start = 6  # 2^6 = 64
+        k_end = (limit_n - 1).bit_length()
         
-        for p in range(p_start, p_end):
-            interval_start = max(2**p, 16384)
-            interval_end = 2**(p+1)
-            
-            exponent = max(0, p - 14)
-            base_step = 256 * (2 ** exponent)
+        for k in range(k_start, min(k_end, 14)):
+            interval_start = 2**k
+            interval_end = 2**(k + 1)
+            ancho_octava = interval_end - interval_start  # 2^k
+            step_exact = ancho_octava / puntos_por_octava
+            step = max(1, int(round(step_exact)))
             
             n = interval_start
-            step_count = 0
             while n < interval_end and n <= limit_n:
                 sizes.append(n)
-                if step_count % 2 == 0:
-                    n += base_step
-                else:
-                    n += base_step + 67
-                step_count += 1
+                n += step
                 
-        if 2**p_end <= limit_n:
-            sizes.append(2**p_end)
+        if 2**14 <= limit_n and (not sizes or sizes[-1] < 16384):
+            sizes.append(16384)
             
         return sizes
+
+    elif algo_lower in ("fft", "fft_1d"):
+        limit_n = min(max_n, 67108864) if max_n is not None else 67108864
+        sizes: List[int] = []
+        puntos_por_octava = 32
+        k_start = 12  # 2^12 = 4096
+        k_end = (limit_n - 1).bit_length()
+        
+        for k in range(k_start, min(k_end, 26)):
+            interval_start = 2**k
+            interval_end = 2**(k + 1)
+            ancho_octava = interval_end - interval_start  # 2^k
+            step_exact = ancho_octava / puntos_por_octava
+            step = max(1, int(round(step_exact)))
+            
+            n = interval_start
+            while n < interval_end and n <= limit_n:
+                sizes.append(n)
+                n += step
+                
+        if 2**26 <= limit_n and (not sizes or sizes[-1] < 67108864):
+            sizes.append(67108864)
+            
+        return sizes
+
+    elif algo_lower in ("fft_2d", "fft_3d"):
+        max_k = 13 if algo_lower == "fft_2d" else 8
+        default_max = 2**max_k
+        limit_n = min(max_n, default_max) if max_n is not None else default_max
+        sizes: List[int] = []
+        puntos_por_octava = 32
+        k_start = 6 if algo_lower == "fft_2d" else 4  # FFT 2D empieza en 64 (2^6), 3D en 16 (2^4)
+        k_end = (limit_n - 1).bit_length()
+        
+        for k in range(k_start, min(k_end, max_k)):
+            interval_start = 2**k
+            interval_end = 2**(k + 1)
+            ancho_octava = interval_end - interval_start  # 2^k
+            step_exact = ancho_octava / puntos_por_octava
+            # step = 0.5 para k=4 (16-32 en 3D), redondeado a 1. Para k>=5, step es 1, 2, 4, 8...
+            step = max(1, int(round(step_exact)))
+            
+            n = interval_start
+            while n < interval_end and n <= limit_n:
+                sizes.append(n)
+                n += step
+                
+        if 2**max_k <= limit_n and (not sizes or sizes[-1] < 2**max_k):
+            sizes.append(2**max_k)
+            
+        return sizes
+
     else:
-        raise ValueError(f"Algoritmo '{algorithm}' no soportado. Debe ser 'gemm' o 'fft'.")
+        raise ValueError(f"Algoritmo '{algorithm}' no soportado. Debe ser 'gemm', 'fft', 'fft_2d' o 'fft_3d'.")
 
 
 # ── Clase principal ───────────────────────────────────────────────────────────

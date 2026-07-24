@@ -99,6 +99,13 @@ def _get_data_bank_manager_cls():
         _DATA_BANK_MANAGER_MODULE = mod
     return _DATA_BANK_MANAGER_MODULE.DataBankManager
 
+def _get_data_bank_manager_module():
+    """Importa el módulo data_bank_manager de forma diferida."""
+    global _DATA_BANK_MANAGER_MODULE
+    if _DATA_BANK_MANAGER_MODULE is None:
+        _get_data_bank_manager_cls()
+    return _DATA_BANK_MANAGER_MODULE
+
 from typing import List, Iterator
 
 
@@ -111,12 +118,12 @@ class RLWorkloadGenerator:
     def __init__(
         self,
         algorithm: str,
-        gemm_min_n: int = 512,
+        gemm_min_n: int = 64,
         gemm_max_n: int = 16384,
         gemm_low_step: int = 32,
         gemm_trans_step: int = 512,
         gemm_high_step: int = 1024,
-        fft_min_n: int = 16384,
+        fft_min_n: int = 4096,
         fft_max_n: int = 67108864,
         fft_low_step: int = 256,
         fft_mid_step: int = 4096,
@@ -126,12 +133,12 @@ class RLWorkloadGenerator:
 
         Args:
             algorithm (str): Algoritmo objetivo ('gemm' o 'fft').
-            gemm_min_n (int, optional): Límite inferior para GEMM. Defaults to 512.
+            gemm_min_n (int, optional): Límite inferior para GEMM. Defaults to 64.
             gemm_max_n (int, optional): Límite superior para GEMM. Defaults to 16384.
             gemm_low_step (int, optional): Incremento en rango de baja latencia. Defaults to 32.
             gemm_trans_step (int, optional): Paso de transición (ignorado, por compatibilidad).
             gemm_high_step (int, optional): Paso intensivo (ignorado, por compatibilidad).
-            fft_min_n (int, optional): Límite inferior para FFT. Defaults to 16384.
+            fft_min_n (int, optional): Límite inferior para FFT. Defaults to 4096.
             fft_max_n (int, optional): Límite superior para FFT. Defaults to 67108864.
             fft_low_step (int, optional): Incremento base para FFT. Defaults to 256.
             fft_mid_step (int, optional): Paso medio (ignorado, por compatibilidad).
@@ -141,8 +148,8 @@ class RLWorkloadGenerator:
             ValueError: Si el algoritmo especificado no está soportado o si algún paso es inválido.
         """
         algo_lower = algorithm.lower()
-        if algo_lower not in {"gemm", "fft"}:
-            raise ValueError(f"Algoritmo '{algorithm}' no soportado. Debe ser 'gemm' o 'fft'.")
+        if algo_lower not in {"gemm", "fft", "fft_1d", "fft_2d", "fft_3d"}:
+            raise ValueError(f"Algoritmo '{algorithm}' no soportado. Debe ser 'gemm', 'fft', 'fft_1d', 'fft_2d' o 'fft_3d'.")
 
         if gemm_low_step not in {32, 64, 128}:
             raise ValueError("gemm_low_step debe ser 32, 64 o 128.")
@@ -169,7 +176,14 @@ class RLWorkloadGenerator:
         """
         if self.algorithm == "gemm":
             return self._generate_gemm()
-        return self._generate_fft()
+        elif self.algorithm in ("fft", "fft_1d"):
+            return self._generate_fft()
+        elif self.algorithm == "fft_2d":
+            return self._generate_fft_2d()
+        elif self.algorithm == "fft_3d":
+            return self._generate_fft_3d()
+        else:
+            raise ValueError(f"Algoritmo desconocido: {self.algorithm}")
 
     def __iter__(self) -> Iterator[int]:
         """Permite iterar directamente sobre el generador.
@@ -180,52 +194,101 @@ class RLWorkloadGenerator:
         return iter(self.generate())
 
     def _generate_gemm(self) -> List[int]:
-        """Genera la lista de tamaños N para GEMM usando la estrategia híbrida por rangos.
+        """Genera la lista de tamaños N para GEMM usando la estrategia por octavas con 32 puntos por octava.
 
         Returns:
             List[int]: Lista de tamaños para GEMM.
         """
         sizes: List[int] = []
-        n = self.gemm_min_n
-        while n <= self.gemm_max_n:
-            sizes.append(n)
-            k = n.bit_length() - 1
-            # El paso empieza en self.gemm_low_step para 2^9 (512) y aumenta 2x por cada potencia de 2
-            exponent = max(0, k - 9)
-            base_step = self.gemm_low_step * (2 ** exponent)
-            n += base_step
+        puntos_por_octava = 32
+        k_start = (self.gemm_min_n).bit_length() - 1
+        k_end = (self.gemm_max_n - 1).bit_length()
+
+        for k in range(k_start, k_end):
+            interval_start = max(2**k, self.gemm_min_n)
+            interval_end = 2**(k + 1)
+            ancho_octava = 2**k
+            step_exact = ancho_octava / puntos_por_octava
+            step = max(1, int(round(step_exact)))
+
+            n = interval_start
+            while n < interval_end and n <= self.gemm_max_n:
+                sizes.append(n)
+                n += step
+
+        if 2**k_end <= self.gemm_max_n and 2**k_end >= self.gemm_min_n and (not sizes or sizes[-1] < self.gemm_max_n):
+            sizes.append(self.gemm_max_n)
+
         return sizes
 
     def _generate_fft(self) -> List[int]:
-        """Genera la lista de tamaños N para FFT usando la estrategia lineal densa progresiva.
+        """Genera la lista de tamaños N para FFT 1D usando el esquema de octavas con 32 puntos por octava.
 
         Returns:
             List[int]: Lista de tamaños para FFT.
         """
         sizes: List[int] = []
-        p_start = (self.fft_min_n).bit_length() - 1
-        p_end = (self.fft_max_n - 1).bit_length()
+        puntos_por_octava = 32
+        k_start = (self.fft_min_n).bit_length() - 1
+        k_end = (self.fft_max_n - 1).bit_length()
 
-        for p in range(p_start, p_end):
-            interval_start = max(2**p, self.fft_min_n)
-            interval_end = 2**(p+1)
-
-            exponent = max(0, p - 14)
-            base_step = self.fft_low_step * (2 ** exponent)
+        for k in range(k_start, k_end):
+            interval_start = max(2**k, self.fft_min_n)
+            interval_end = 2**(k + 1)
+            ancho_octava = 2**k
+            step_exact = ancho_octava / puntos_por_octava
+            step = max(1, int(round(step_exact)))
 
             n = interval_start
-            step_count = 0
             while n < interval_end and n <= self.fft_max_n:
                 sizes.append(n)
-                if step_count % 2 == 0:
-                    n += base_step
-                else:
-                    n += base_step + 67
-                step_count += 1
+                n += step
 
-        if 2**p_end <= self.fft_max_n and 2**p_end >= self.fft_min_n:
-            sizes.append(2**p_end)
+        if 2**k_end <= self.fft_max_n and 2**k_end >= self.fft_min_n and (not sizes or sizes[-1] < self.fft_max_n):
+            sizes.append(self.fft_max_n)
 
+        return sizes
+
+    def _generate_fft_2d(self) -> List[int]:
+        """Genera tamaños N para FFT 2D en esquema de octavas (2^6 a 2^13, 64 a 8192) con 32 puntos por octava.
+
+        Returns:
+            List[int]: Lista de tamaños N para matrices N x N.
+        """
+        sizes: List[int] = []
+        puntos_por_octava = 32
+        for k in range(6, 13):
+            interval_start = 2**k
+            interval_end = 2**(k + 1)
+            ancho_octava = interval_end - interval_start
+            step_exact = ancho_octava / puntos_por_octava
+            step = max(1, int(round(step_exact)))
+            n = interval_start
+            while n < interval_end:
+                sizes.append(n)
+                n += step
+        sizes.append(8192)
+        return sizes
+
+    def _generate_fft_3d(self) -> List[int]:
+        """Genera tamaños N para FFT 3D en esquema de octavas (2^4 a 2^8, 16 a 256) con 32 puntos por octava.
+
+        Returns:
+            List[int]: Lista de tamaños N para volúmenes N x N x N.
+        """
+        sizes: List[int] = []
+        puntos_por_octava = 32
+        for k in range(4, 8):
+            interval_start = 2**k
+            interval_end = 2**(k + 1)
+            ancho_octava = interval_end - interval_start
+            step_exact = ancho_octava / puntos_por_octava
+            step = max(1, int(round(step_exact)))
+            n = interval_start
+            while n < interval_end:
+                sizes.append(n)
+                n += step
+        sizes.append(256)
         return sizes
 
 
@@ -367,6 +430,18 @@ def parse_fft_layouts(raw):
 def parse_fft_shapes(raw, dims):
     if not raw.strip():
         return []
+    raw_lower = raw.strip().lower()
+    if raw_lower in ("auto", "octave", "default"):
+        db_mgr_mod = _get_data_bank_manager_module()
+        algo_name = f"fft_{dims}d" if dims in (2, 3) else "fft_1d"
+        sizes = db_mgr_mod.generate_size_sweep(algorithm=algo_name)
+        if dims == 1:
+            return [(n, 0, 0) for n in sizes]
+        elif dims == 2:
+            return [(n, n, 0) for n in sizes]
+        else:
+            return [(n, n, n) for n in sizes]
+
     shapes = []
     tokens = [x.strip() for x in raw.split(",") if x.strip()]
     for token in tokens:
@@ -1592,16 +1667,25 @@ def run_gemm(args):
 
 def run_fft(args):
     if args.mode == "continuous-rl":
-        generator = RLWorkloadGenerator(
-            algorithm="fft",
-            fft_min_n=args.fft_min_n,
-            fft_max_n=args.fft_max_n,
-            fft_low_step=args.fft_low_step,
-            fft_mid_step=args.fft_mid_step,
-            fft_high_step=args.fft_high_step,
-        )
-        sizes = generator.generate()
-        shapes = [(n, 0, 0) for n in sizes]
+        shapes = []
+        if args.fft_sizes_1d and args.fft_sizes_1d.strip():
+            shapes.extend(parse_fft_shapes(args.fft_sizes_1d, 1))
+        if args.fft_sizes_2d and args.fft_sizes_2d.strip():
+            shapes.extend(parse_fft_shapes(args.fft_sizes_2d, 2))
+        if args.fft_sizes_3d and args.fft_sizes_3d.strip():
+            shapes.extend(parse_fft_shapes(args.fft_sizes_3d, 3))
+
+        if not shapes:
+            generator = RLWorkloadGenerator(
+                algorithm="fft",
+                fft_min_n=args.fft_min_n,
+                fft_max_n=args.fft_max_n,
+                fft_low_step=args.fft_low_step,
+                fft_mid_step=args.fft_mid_step,
+                fft_high_step=args.fft_high_step,
+            )
+            sizes = generator.generate()
+            shapes = [(n, 0, 0) for n in sizes]
     else:
         sizes_1d = parse_fft_shapes(args.fft_sizes_1d, 1)
         sizes_2d = parse_fft_shapes(args.fft_sizes_2d, 2)
@@ -1798,8 +1882,8 @@ def main():
     parser.add_argument(
         "--gemm-min-n",
         type=int,
-        default=512,
-        help="Limite inferior para GEMM en modo continuous-rl (por defecto: 512)",
+        default=64,
+        help="Limite inferior para GEMM en modo continuous-rl (por defecto: 64)",
     )
     parser.add_argument(
         "--gemm-max-n",
@@ -1829,8 +1913,8 @@ def main():
     parser.add_argument(
         "--fft-min-n",
         type=int,
-        default=16384,
-        help="Limite inferior para FFT en modo continuous-rl (por defecto: 16384)",
+        default=4096,
+        help="Limite inferior para FFT en modo continuous-rl (por defecto: 4096)",
     )
     parser.add_argument(
         "--fft-max-n",
