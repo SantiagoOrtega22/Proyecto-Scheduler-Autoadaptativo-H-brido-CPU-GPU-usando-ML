@@ -1552,13 +1552,16 @@ def run_gemm(args):
             "Precision",
             "OpA",
             "OpB",
-            "Iteration",
+        ]
+        if args.repetitions > 1:
+            fieldnames.append("Iteration")
+        fieldnames.extend([
             "Time_sec",
             "GFLOPS",
             "Avg_Power_W",
             "Energy_J",
             "EDP",
-        ]
+        ])
 
         if args.full_dim_sweep:
             dim_cases = list(itertools.product(sizes, sizes, sizes))
@@ -1648,7 +1651,8 @@ def run_gemm(args):
                             # Include Device and Iteration in the written row
                             row = {key: result.get(key, 0.0) for key in fieldnames if key not in ["Device", "Iteration"]}
                             row["Device"] = device
-                            row["Iteration"] = rep
+                            if args.repetitions > 1:
+                                row["Iteration"] = rep
                             writer.writerow(row)
                             f.flush()
 
@@ -1692,7 +1696,7 @@ def run_fft(args):
         sizes_3d = parse_fft_shapes(args.fft_sizes_3d, 3)
         shapes = sizes_1d + sizes_2d + sizes_3d
         if not shapes:
-            raise ValueError("No se definieron tamanos FFT (1D/2D/3D)")
+            raise ValueError("No se definieron tamaños FFT (1D/2D/3D)")
 
     batches = parse_int_list(args.fft_batches, "batches")
     precisions = parse_fft_precisions(args.fft_precisions)
@@ -1719,7 +1723,10 @@ def run_fft(args):
             "Domain",
             "Direction",
             "Layout",
-            "Iteration",
+        ]
+        if args.repetitions > 1:
+            fieldnames.append("Iteration")
+        fieldnames.extend([
             "Time_sec",
             "GFLOPS",
             "Avg_Power_W",
@@ -1728,7 +1735,7 @@ def run_fft(args):
             "Payload_Bytes",
             "Radix_Class",
             "Samples_Power",
-        ]
+        ])
 
         cases = []
         for nx, ny, nz in shapes:

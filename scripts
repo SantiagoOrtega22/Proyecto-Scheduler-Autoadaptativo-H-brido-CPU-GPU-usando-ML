@@ -1,0 +1,28 @@
+
+Ejecuta fft:
+completo: 
+sudo python3 benchmark_runner.py --benchmark fft     --mode continuous-rl     --device both --fft-sizes-1d auto     --fft-sizes-3d auto     --fft-sizes-2d auto
+
+Para 1D: (14368 cpu +  gpu)
+Min - Max
+2^12 - 2^26
+4096 - 67108864
+sudo python3 benchmark_runner.py --benchmark fft     --mode continuous-rl     --device both     --fft-sizes-1d auto     --fft-sizes-3d ""     --fft-sizes-2d ""
+
+Para 2D: (7200 cpu +  gpu)
+Min - Max
+64x64 - 8192x8192 
+sudo python3 benchmark_runner.py --benchmark fft     --mode continuous-rl     --device both     --fft-sizes-1d ""     --fft-sizes-3d ""     --fft-sizes-2d auto
+
+Para 3D: (3616 cpu +  gpu)
+Min - Max
+16x16x16 - 256x256x256 
+sudo python3 benchmark_runner.py --benchmark fft     --mode continuous-rl     --device both     --fft-sizes-1d ""     --fft-sizes-3d auto     --fft-sizes-2d ""
+
+
+Ejecuta gemm: (18504 cpu +  gpu) 
+Min - Max
+2^6 - 2^14 
+64 - 16384
+sudo python3 benchmark_runner.py --benchmark gemm --mode continuous-rl --device both
+
