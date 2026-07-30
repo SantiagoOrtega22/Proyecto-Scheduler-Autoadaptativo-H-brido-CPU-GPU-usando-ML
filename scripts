@@ -26,3 +26,23 @@ Min - Max
 64 - 16384
 sudo python3 benchmark_runner.py --benchmark gemm --mode continuous-rl --device both
 
+
+LIBRERIAS
+
+1. Entorno de Python y Librerías
+Python: 3.14.6
+numpy: 2.4.4
+pandas: 3.0.3
+scipy: 1.17.1
+pynvml: 13.0.1 (soporta también nvidia-ml-py v13.595.45)
+matplotlib: 3.10.9
+2. Compiladores
+GCC (C/C++): 15.2.1
+NVCC (NVIDIA CUDA Compiler): CUDA 13.2 (V13.2.51)
+3. Librerías de Cómputo Cero/Bajo Nivel (HPC / GPU)
+FFTW3 (CPU): v3.x (libfftw3.so.3)
+OpenBLAS (CPU): libopenblas.so.0 / libopenblasp.so
+cuBLAS (GPU): v13 (libcublas.so.13)
+cuFFT (GPU): v12 (libcufft.so.12)
+
+pip install numpy pandas scipy pynvml matplotlib
