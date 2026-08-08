@@ -1846,7 +1846,8 @@ def run_fft(args):
 
                             row = {key: result.get(key, 0.0) for key in fieldnames if key not in ["Device", "Iteration"]}
                             row["Device"] = device
-                            row["Iteration"] = rep
+                            if args.repetitions > 1:
+                                row["Iteration"] = rep
                             writer.writerow(row)
                             f.flush()
 
