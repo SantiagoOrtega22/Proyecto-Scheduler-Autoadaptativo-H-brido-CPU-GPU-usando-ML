@@ -15,7 +15,7 @@
  *   - Clean resource management to isolate execution costs.
  *
  * Compilation instructions (OpenBLAS):
- *   gcc -O3 -march=native -o algoritmos/gemm_cpu algoritmos/gemm_cpu.c -I/usr/include/openblas -lopenblas -lm
+ *   gcc -O3 -march=native -o algoritmos/gemm_cpu algoritmos/gemm_cpu.c -I/usr/include/openblas -lopenblasp -lm
  *
  * Compilation instructions (MKL):
  *   gcc -O3 -march=native -o algoritmos/gemm_cpu algoritmos/gemm_cpu.c -lmkl_rt -lpthread -lm

@@ -12,7 +12,7 @@
  *  - Explicit resource deallocation (fftw_free, fftw_destroy_plan) to prevent memory leaks (OOM).
  *
  * Compilation instructions:
- *   gcc -O3 -o algoritmos/fft_cpu algoritmos/fft_cpu.c -lfftw3 -lfftw3f -lm
+ *   gcc -O3 -fopenmp -o algoritmos/fft_cpu algoritmos/fft_cpu.c -lfftw3_omp -lfftw3f_omp -lfftw3 -lfftw3f -lm
  */
 
 #include <stdio.h>
@@ -22,6 +22,28 @@
 #include <math.h>
 #include <time.h>
 #include <fftw3.h>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+/**
+ * @brief Determines the number of threads to use for FFTW execution.
+ * Checks environment variables (OMP_NUM_THREADS, FFTW_NUM_THREADS) or OpenMP max threads.
+ * @return int Number of threads.
+ */
+static int get_num_threads(void) {
+    const char *env = getenv("OMP_NUM_THREADS");
+    if (!env) env = getenv("FFTW_NUM_THREADS");
+    if (env && atoi(env) > 0) {
+        return atoi(env);
+    }
+#ifdef _OPENMP
+    return omp_get_max_threads();
+#else
+    return 1;
+#endif
+}
 
 /**
  * @struct FftConfig
@@ -999,6 +1021,14 @@ int main(int argc, char **argv) {
         cfg.direction = 'I';
     }
 
+    int nthreads = get_num_threads();
+    if (nthreads > 1) {
+        if (fftw_init_threads() != 0 && fftwf_init_threads() != 0) {
+            fftw_plan_with_nthreads(nthreads);
+            fftwf_plan_with_nthreads(nthreads);
+        }
+    }
+
     if (cfg.precision == 'S') {
         benchmark_fft_float(&cfg);
     } else {
@@ -1006,6 +1036,11 @@ int main(int argc, char **argv) {
     }
 
     clear_loaded_fft_inputs();
+
+    if (nthreads > 1) {
+        fftw_cleanup_threads();
+        fftwf_cleanup_threads();
+    }
 
     return 0;
 }
