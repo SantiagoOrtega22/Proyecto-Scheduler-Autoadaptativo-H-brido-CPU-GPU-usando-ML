@@ -19,7 +19,7 @@ The benchmark module is used by students for the data collection process require
 
 ## Section 3 - Functionalities
 
-* **Data Sourcing**: The benchmark must retrieve the necessary matrix or array from the data bank for test execution.
+* **Data Sourcing & Determinism**: The benchmark retrieves matrices/arrays from the binary data bank or generates them in-memory deterministically using a fixed random seed (`BENCH_SEED` / `seed = 42`) to guarantee scientific reproducibility across runs.
 * **GEMM Variations**: GEMM codes must include their different variations (**sgemm, dgemm, cgemm, zgemm**) and vary their internal parameters, such as transposes.
 * **FFT Variations**: FFT codes must include different variations (**1D, 2D, 3D**) with the possibility of varying internal parameters like **R2C** and **C2C**.
 * **Metric Measurement**:
@@ -96,6 +96,7 @@ Como tu asesor **Copia TG**, he redactado esta especificación técnica. Puedes 
 * **Resource Management**: Always use Context Managers (`with` statements) for file operations and database connections.
 * **Explicit Synchronization**: GPU tasks must be preceded and followed by `cudaDeviceSynchronize()` to ensure the host timer accurately reflects kernel completion.
 * **Memory Management**: Explicitly clear or free large matrices/arrays between runs to prevent memory leaks and "Out of Memory" (OOM) errors during long sweeps.
+* **Deterministic Data Generation**: Matrices and vectors must be generated using a deterministic pseudo-random number generator with a fixed seed (`BENCH_SEED` / `seed = 42`) across CPU and GPU executions to ensure strict scientific reproducibility and identical test inputs.
 
 #### 7.3 Documentation Standards
 

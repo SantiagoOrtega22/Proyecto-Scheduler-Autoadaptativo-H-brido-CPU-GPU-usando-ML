@@ -306,21 +306,6 @@ IDLE_POWER_CPU = 0.0
 DEFAULT_DATABANK_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bench_files", "databank")
 DEFAULT_DATABANK_MAX_N = 67108864
 
-DEFAULT_BENCHMARK_BANK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bench_files", "benchmark_bank.h5")
-
-
-
-
-def _require_h5py():
-    try:
-        import h5py
-    except ModuleNotFoundError as exc:
-        raise ModuleNotFoundError(
-            "h5py es necesario para usar el banco HDF5 de benchmarks. "
-            "Instala la dependencia con: python3 -m pip install h5py"
-        ) from exc
-    return h5py
-
 
 def warn_rapl_missing_once():
     global _RAPL_WARNING_SHOWN
@@ -458,80 +443,6 @@ def parse_fft_shapes(raw, dims):
         else:
             shapes.append((values[0], values[1], values[2]))
     return shapes
-
-
-def bank_dataset_exists(bank_path, dataset_path):
-    h5py = _require_h5py()
-    if not bank_path or not os.path.isfile(bank_path):
-        return False
-    try:
-        with h5py.File(bank_path, "r") as hf:
-            return dataset_path in hf
-    except OSError:
-        return False
-
-
-def write_gemm_matrix_file_from_arrays(m, n, k, precision, a_values, b_values, c_values):
-    fd, matrix_file = tempfile.mkstemp(prefix="gemm_", suffix=".bin")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(struct.pack("i", m))
-            f.write(struct.pack("i", n))
-            f.write(struct.pack("i", k))
-            f.write(precision.encode("ascii"))
-
-            if precision in ("S", "D"):
-                fmt = "d" if precision == "D" else "f"
-                for val in a_values:
-                    f.write(struct.pack(fmt, float(val)))
-                for val in b_values:
-                    f.write(struct.pack(fmt, float(val)))
-                for val in c_values:
-                    f.write(struct.pack(fmt, float(val)))
-            else:
-                fmt = "d" if precision == "Z" else "f"
-                for re, im in a_values:
-                    f.write(struct.pack(fmt, float(re)))
-                    f.write(struct.pack(fmt, float(im)))
-                for re, im in b_values:
-                    f.write(struct.pack(fmt, float(re)))
-                    f.write(struct.pack(fmt, float(im)))
-                for re, im in c_values:
-                    f.write(struct.pack(fmt, float(re)))
-                    f.write(struct.pack(fmt, float(im)))
-    except Exception:
-        os.unlink(matrix_file)
-        raise
-    return matrix_file
-
-
-def write_fft_matrix_file_from_arrays(nx, ny, nz, batch, precision, domain, input_values, output_values):
-    fd, matrix_file = tempfile.mkstemp(prefix="fft_", suffix=".bin")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(struct.pack("i", nx))
-            f.write(struct.pack("i", ny))
-            f.write(struct.pack("i", nz))
-            f.write(struct.pack("i", batch))
-            f.write(precision.encode("ascii"))
-            f.write(domain.encode("ascii"))
-            fmt = "d" if precision == "D" else "f"
-            for value in input_values:
-                if isinstance(value, complex):
-                    f.write(struct.pack(fmt, float(value.real)))
-                    f.write(struct.pack(fmt, float(value.imag)))
-                else:
-                    f.write(struct.pack(fmt, float(value)))
-            for value in output_values:
-                if isinstance(value, complex):
-                    f.write(struct.pack(fmt, float(value.real)))
-                    f.write(struct.pack(fmt, float(value.imag)))
-                else:
-                    f.write(struct.pack(fmt, float(value)))
-    except Exception:
-        os.unlink(matrix_file)
-        raise
-    return matrix_file
 
 
 def fft_dims(nx, ny, nz):
@@ -832,62 +743,38 @@ def find_rapl_energy_paths():
 
 def generate_gemm_matrix_file(
     m, n, k, precision,
-    seed=None, bank_path=None, bank_profile="dense_normal",
+    seed=None, use_databank=False, bank_profile="dense_normal",
     databank_dir=None, databank_max_n=None,
 ):
-    """Retorna la ruta a un archivo GEMM kernel-ready o None para generación in-memory determinista."""
-    if bank_path and precision in {"S", "D"} and m == n == k:
+    """Retorna la ruta a un archivo GEMM kernel-ready (DataBankManager) o None para generación in-memory determinista."""
+    if use_databank:
         try:
-            h5py = _require_h5py()
-            dataset_root = f"/gemm/N{m}/{bank_profile}"
-            a_key = f"{dataset_root}/A_{'f64' if precision == 'D' else 'f32'}"
-            b_key = f"{dataset_root}/B_{'f64' if precision == 'D' else 'f32'}"
-            if bank_dataset_exists(bank_path, a_key) and bank_dataset_exists(bank_path, b_key):
-                with h5py.File(bank_path, "r") as hf:
-                    a_values = hf[a_key][()]
-                    b_values = hf[b_key][()]
-                c_values = [0.0] * (m * n)
-                return write_gemm_matrix_file_from_arrays(
-                    m, n, k, precision,
-                    a_values.ravel(), b_values.ravel(), c_values,
-                ), False
-        except Exception:
-            pass
+            DataBankManager = _get_data_bank_manager_cls()
+            db_dir = databank_dir or DEFAULT_DATABANK_DIR
+            db = DataBankManager(base_dir=db_dir, seed=seed or 42, max_n=databank_max_n)
+            matrix_file = db.get_gemm_path(m, n, k, precision, profile=bank_profile)
+            return matrix_file, True  # Es persistente del DataBankManager
+        except Exception as ex:
+            print(f"[!] Error en DataBankManager para GEMM ({m}x{n}x{k}, {precision}): {ex}", file=sys.stderr)
 
     return None, False
 
 
 def generate_fft_matrix_file(
     nx, ny, nz, batch, precision, domain, layout,
-    seed=None, bank_path=None, bank_profile="broadband",
+    seed=None, use_databank=False, bank_profile="broadband",
     databank_dir=None, databank_max_n=None,
 ):
-    """Retorna la ruta a un archivo FFT kernel-ready o None para generación in-memory determinista."""
-    if bank_path and ny == 0 and nz == 0:
+    """Retorna la ruta a un archivo FFT kernel-ready (DataBankManager) o None para generación in-memory determinista."""
+    if use_databank:
         try:
-            h5py = _require_h5py()
-            dataset_root = f"/fft/N{nx}/{bank_profile}"
-            label = "c128" if precision == "D" else ("f64" if precision == "D" and domain == "R2C" else "f32")
-            dataset_key = f"{dataset_root}/{label}"
-            if bank_dataset_exists(bank_path, dataset_key):
-                with h5py.File(bank_path, "r") as hf:
-                    payload = list(hf[dataset_key][()])
-                if batch > 1:
-                    payload = payload * batch
-                if domain == "C2C":
-                    input_values, output_values = payload, [0j] * len(payload)
-                elif domain == "R2C":
-                    input_values = payload
-                    output_values = [0j] * (nx * batch)
-                else:
-                    input_values = payload
-                    output_values = [0.0] * (nx * batch)
-                return write_fft_matrix_file_from_arrays(
-                    nx, ny, nz, batch, precision, domain,
-                    input_values, output_values,
-                ), False
-        except Exception:
-            pass
+            DataBankManager = _get_data_bank_manager_cls()
+            db_dir = databank_dir or DEFAULT_DATABANK_DIR
+            db = DataBankManager(base_dir=db_dir, seed=seed or 42, max_n=databank_max_n)
+            matrix_file = db.get_fft_path(nx, ny, nz, batch, precision, domain, profile=bank_profile)
+            return matrix_file, True  # Es persistente del DataBankManager
+        except Exception as ex:
+            print(f"[!] Error en DataBankManager para FFT ({nx}x{ny}x{nz}, {precision}, {domain}): {ex}", file=sys.stderr)
 
     return None, False
 
@@ -922,8 +809,8 @@ def run_single_case(
     timeout,
     is_warmup,
     seed,
-    bank_path,
-    bank_profile,
+    use_databank=False,
+    bank_profile="dense_normal",
     databank_dir=None,
     databank_max_n=None,
 ):
@@ -933,7 +820,7 @@ def run_single_case(
         k,
         precision,
         seed=seed,
-        bank_path=bank_path,
+        use_databank=use_databank,
         bank_profile=bank_profile,
         databank_dir=databank_dir,
         databank_max_n=databank_max_n,
@@ -1520,8 +1407,8 @@ def run_gemm(args):
                                     args.timeout,
                                     True, # is_warmup
                                     args.seed if args.seed else None,
-                                    args.benchmark_bank,
-                                    args.gemm_profile,
+                                    use_databank=args.use_databank,
+                                    bank_profile=args.gemm_profile,
                                     databank_dir=args.databank_dir,
                                     databank_max_n=args.databank_max_n,
                                 )
@@ -1543,8 +1430,8 @@ def run_gemm(args):
                                         args.timeout,
                                         True, # is_warmup
                                         args.seed if args.seed else None,
-                                        args.benchmark_bank,
-                                        args.gemm_profile,
+                                        use_databank=args.use_databank,
+                                        bank_profile=args.gemm_profile,
                                         databank_dir=args.databank_dir,
                                         databank_max_n=args.databank_max_n,
                                     )
@@ -1563,8 +1450,8 @@ def run_gemm(args):
                                     args.timeout,
                                     False, # is_warmup
                                     args.seed if args.seed else None,
-                                    args.benchmark_bank,
-                                    args.gemm_profile,
+                                    use_databank=args.use_databank,
+                                    bank_profile=args.gemm_profile,
                                     databank_dir=args.databank_dir,
                                     databank_max_n=args.databank_max_n,
                                 )
@@ -1692,7 +1579,7 @@ def run_fft(args):
                         domain,
                         layout,
                         seed=args.seed,
-                        bank_path=args.benchmark_bank,
+                        use_databank=args.use_databank,
                         bank_profile=args.fft_profile,
                         databank_dir=args.databank_dir,
                         databank_max_n=args.databank_max_n,
@@ -1931,9 +1818,9 @@ def main():
         help="Semilla fija para matrices (se exporta como BENCH_SEED)",
     )
     parser.add_argument(
-        "--benchmark-bank",
-        default=DEFAULT_BENCHMARK_BANK,
-        help="Ruta al banco HDF5 legacy (fallback si DataBankManager falla)",
+        "--use-databank",
+        action="store_true",
+        help="Usa archivos binarios del DataBankManager en lugar de generación determinista in-memory",
     )
     parser.add_argument(
         "--gemm-profile",
