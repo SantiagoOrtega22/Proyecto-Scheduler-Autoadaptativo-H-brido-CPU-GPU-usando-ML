@@ -313,29 +313,60 @@ static double sum_log2_dims(int rank, const int dims[3]) {
     return sum;
 }
 
+#include <stdint.h>
+
+static inline uint64_t bench_lcg_next(uint64_t *state) {
+    *state = (*state * 6364136223846793005ULL + 1442695040888963407ULL);
+    return *state;
+}
+
+static inline float bench_lcg_float(uint64_t *state) {
+    return (float)(bench_lcg_next(state) >> 40) / 16777216.0f;
+}
+
+static inline double bench_lcg_double(uint64_t *state) {
+    return (double)(bench_lcg_next(state) >> 11) / 9007199254740992.0;
+}
+
+static uint64_t get_bench_seed(void) {
+    const char *env = getenv("BENCH_SEED");
+    if (env && *env) {
+        char *end = NULL;
+        unsigned long long val = strtoull(env, &end, 10);
+        if (end != env) {
+            return (uint64_t)val;
+        }
+    }
+    return 42ULL;
+}
+
 static void fill_real_double(double *buf, size_t count) {
+    uint64_t state = get_bench_seed();
     for (size_t i = 0; i < count; ++i) {
-        buf[i] = (double)rand() / RAND_MAX;
+        buf[i] = bench_lcg_double(&state);
     }
 }
 
 static void fill_complex_double(fftw_complex *buf, size_t count) {
+    uint64_t state = get_bench_seed();
     for (size_t i = 0; i < count; ++i) {
-        buf[i][0] = (double)rand() / RAND_MAX;
-        buf[i][1] = 0.0;
+        buf[i][0] = bench_lcg_double(&state);
+        buf[i][1] = bench_lcg_double(&state);
     }
 }
 
 static void fill_real_float(float *buf, size_t count) {
+    uint64_t state = get_bench_seed();
     for (size_t i = 0; i < count; ++i) {
-        buf[i] = (float)rand() / (float)RAND_MAX;
+        buf[i] = bench_lcg_float(&state);
     }
 }
 
 static void fill_complex_float(fftwf_complex *buf, size_t count) {
+    uint64_t state = get_bench_seed();
     for (size_t i = 0; i < count; ++i) {
-        buf[i][0] = (float)rand() / (float)RAND_MAX;
-        buf[i][1] = 0.0f;
+        buf[i][0] = bench_lcg_float(&state);
+        buf[i][1] = bench_lcg_float(&state);
     }
 }
 

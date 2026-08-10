@@ -383,6 +383,87 @@ static int load_gemm_input_from_file(const char *path, GemmInput *input) {
 	return 0;
 }
 
+#include <stdint.h>
+
+static inline uint64_t bench_lcg_next(uint64_t *state) {
+	*state = (*state * 6364136223846793005ULL + 1442695040888963407ULL);
+	return *state;
+}
+
+static inline float bench_lcg_float(uint64_t *state) {
+	return (float)(bench_lcg_next(state) >> 40) / 16777216.0f;
+}
+
+static inline double bench_lcg_double(uint64_t *state) {
+	return (double)(bench_lcg_next(state) >> 11) / 9007199254740992.0;
+}
+
+static uint64_t get_bench_seed(void) {
+	const char *env = getenv("BENCH_SEED");
+	if (env && *env) {
+		char *end = NULL;
+		unsigned long long val = strtoull(env, &end, 10);
+		if (end != env) {
+			return (uint64_t)val;
+		}
+	}
+	return 42ULL;
+}
+
+static int generate_gemm_input_in_memory(int m, int n, int k, char precision, GemmInput *input) {
+	size_t a_count = (size_t)m * (size_t)k;
+	size_t b_count = (size_t)k * (size_t)n;
+	size_t c_count = (size_t)m * (size_t)n;
+
+	input->m = m;
+	input->n = n;
+	input->k = k;
+	input->precision = precision;
+	input->a = NULL;
+	input->b = NULL;
+	input->c = NULL;
+
+	uint64_t state_a = get_bench_seed();
+	uint64_t state_b = state_a + 1ULL;
+
+	if (precision == 'S') {
+		float *a = (float *)malloc(a_count * sizeof(float));
+		float *b = (float *)malloc(b_count * sizeof(float));
+		float *c = (float *)calloc(c_count, sizeof(float));
+		if (!a || !b || !c) { free(a); free(b); free(c); return -1; }
+		for (size_t i = 0; i < a_count; ++i) a[i] = bench_lcg_float(&state_a);
+		for (size_t i = 0; i < b_count; ++i) b[i] = bench_lcg_float(&state_b);
+		input->a = a; input->b = b; input->c = c;
+	} else if (precision == 'D') {
+		double *a = (double *)malloc(a_count * sizeof(double));
+		double *b = (double *)malloc(b_count * sizeof(double));
+		double *c = (double *)calloc(c_count, sizeof(double));
+		if (!a || !b || !c) { free(a); free(b); free(c); return -1; }
+		for (size_t i = 0; i < a_count; ++i) a[i] = bench_lcg_double(&state_a);
+		for (size_t i = 0; i < b_count; ++i) b[i] = bench_lcg_double(&state_b);
+		input->a = a; input->b = b; input->c = c;
+	} else if (precision == 'C') {
+		float *a = (float *)malloc(a_count * 2 * sizeof(float));
+		float *b = (float *)malloc(b_count * 2 * sizeof(float));
+		float *c = (float *)calloc(c_count * 2, sizeof(float));
+		if (!a || !b || !c) { free(a); free(b); free(c); return -1; }
+		for (size_t i = 0; i < a_count * 2; ++i) a[i] = bench_lcg_float(&state_a);
+		for (size_t i = 0; i < b_count * 2; ++i) b[i] = bench_lcg_float(&state_b);
+		input->a = a; input->b = b; input->c = c;
+	} else if (precision == 'Z') {
+		double *a = (double *)malloc(a_count * 2 * sizeof(double));
+		double *b = (double *)malloc(b_count * 2 * sizeof(double));
+		double *c = (double *)calloc(c_count * 2, sizeof(double));
+		if (!a || !b || !c) { free(a); free(b); free(c); return -1; }
+		for (size_t i = 0; i < a_count * 2; ++i) a[i] = bench_lcg_double(&state_a);
+		for (size_t i = 0; i < b_count * 2; ++i) b[i] = bench_lcg_double(&state_b);
+		input->a = a; input->b = b; input->c = c;
+	} else {
+		return -1;
+	}
+	return 0;
+}
+
 /**
  * Parses the precision character from a GEMM variation name.
  *
@@ -564,10 +645,6 @@ static int parse_cli(int argc, char **argv, GemmCli *cli) {
 	}
 	if (cli->precision == '\0') {
 		fprintf(stderr, "Debes indicar la precision o la funcion GEMM\n");
-		return -1;
-	}
-	if (!cli->source_path || !*cli->source_path) {
-		fprintf(stderr, "Debes indicar el archivo de origen con --source o como argumento final\n");
 		return -1;
 	}
 	if (cli->warmup_runs < 0 || cli->iters < 0) {
@@ -893,15 +970,21 @@ int main(int argc, char **argv) {
 	}
 
 	GemmInput input;
-	if (load_gemm_input_from_file(cli.source_path, &input) != 0) {
-		return 1;
-	}
-
-	if (cli.m != input.m || cli.n != input.n || cli.k != input.k) {
-		fprintf(stderr, "Aviso: las dimensiones del archivo de matrices sobreescriben M/N/K del CLI\n");
-	}
-	if (cli.precision != input.precision) {
-		fprintf(stderr, "Aviso: la precision del archivo de matrices sobreescribe la del CLI\n");
+	if (cli.source_path && *cli.source_path) {
+		if (load_gemm_input_from_file(cli.source_path, &input) != 0) {
+			return 1;
+		}
+		if (cli.m != input.m || cli.n != input.n || cli.k != input.k) {
+			fprintf(stderr, "Aviso: las dimensiones del archivo de matrices sobreescriben M/N/K del CLI\n");
+		}
+		if (cli.precision != input.precision) {
+			fprintf(stderr, "Aviso: la precision del archivo de matrices sobreescribe la del CLI\n");
+		}
+	} else {
+		if (generate_gemm_input_in_memory(cli.m, cli.n, cli.k, cli.precision, &input) != 0) {
+			fprintf(stderr, "Error al generar matrices en memoria\n");
+			return 1;
+		}
 	}
 
 	double time_sec = 0.0;

@@ -835,41 +835,7 @@ def generate_gemm_matrix_file(
     seed=None, bank_path=None, bank_profile="dense_normal",
     databank_dir=None, databank_max_n=None,
 ):
-    """Retorna la ruta a un archivo GEMM kernel-ready usando DataBankManager.
-
-    Política:
-        1. DataBankManager (banco binario persistente, lazy) — ruta primaria.
-        2. Banco HDF5 legacy (solo S/D, solo tamaños pre-generados).
-        3. Generación aleatoria en memoria → archivo temporal.
-
-    Args:
-        m, n, k: Dimensiones de las matrices.
-        precision: S, D, C o Z.
-        seed: Semilla aleatoria (solo para fallback temporal).
-        bank_path: Ruta al HDF5 legacy (opcional).
-        bank_profile: Perfil en el banco HDF5 / DataBankManager.
-        databank_dir: Raíz del banco binario. None usa DEFAULT_DATABANK_DIR.
-        databank_max_n: Techo N para el banco. None usa DEFAULT_DATABANK_MAX_N.
-
-    Returns:
-        tuple[str, bool]: (ruta_archivo, es_persistente).
-            es_persistente=True  → NO borrar al terminar.
-            es_persistente=False → archivo temporal, borrar en finally.
-    """
-    # ── Ruta primaria: DataBankManager (binario plano, lazy) ──────────────────
-    try:
-        DataBankManager = _get_data_bank_manager_cls()
-        db_dir = databank_dir or DEFAULT_DATABANK_DIR
-        db_max = databank_max_n or DEFAULT_DATABANK_MAX_N
-        mgr = DataBankManager(base_dir=db_dir, max_n=db_max)
-        path = mgr.get_gemm_path(m, n, k, precision, profile=bank_profile)
-        return path, True
-    except Exception as e:
-        import sys
-        print(f"\n[DEBUG] Error en DataBankManager: {type(e).__name__} - {e}\n", file=sys.stderr)
-        pass  # Fallback al banco HDF5 o generación aleatoria
-
-    # ── Fallback 1: banco HDF5 legacy (solo S/D cuadradas) ───────────────────
+    """Retorna la ruta a un archivo GEMM kernel-ready o None para generación in-memory determinista."""
     if bank_path and precision in {"S", "D"} and m == n == k:
         try:
             h5py = _require_h5py()
@@ -888,22 +854,7 @@ def generate_gemm_matrix_file(
         except Exception:
             pass
 
-    # ── Fallback 2: generación aleatoria (archivo temporal) ──────────────────
-    if seed is not None:
-        random.seed(seed)
-    else:
-        random.seed(random.randint(0, 2**31 - 1))
-
-    if precision in ("S", "D"):
-        A = [random.random() for _ in range(m * k)]
-        B = [random.random() for _ in range(k * n)]
-        C = [0.0] * (m * n)
-    else:
-        A = [(random.random(), random.random()) for _ in range(m * k)]
-        B = [(random.random(), random.random()) for _ in range(k * n)]
-        C = [(0.0, 0.0)] * (m * n)
-
-    return write_gemm_matrix_file_from_arrays(m, n, k, precision, A, B, C), False
+    return None, False
 
 
 def generate_fft_matrix_file(
@@ -911,46 +862,12 @@ def generate_fft_matrix_file(
     seed=None, bank_path=None, bank_profile="broadband",
     databank_dir=None, databank_max_n=None,
 ):
-    """Retorna la ruta a un archivo FFT kernel-ready usando DataBankManager.
-
-    Política:
-        1. DataBankManager (banco binario persistente, lazy) — ruta primaria.
-        2. Banco HDF5 legacy (solo 1D, solo tamaños pre-generados).
-        3. Generación aleatoria en memoria → archivo temporal.
-
-    Args:
-        nx, ny, nz: Dimensiones del transform (ny=nz=0 para 1D).
-        batch: Número de transforms.
-        precision: S o D.
-        domain: C2C, R2C o C2R.
-        layout: I (in-place) u O (out-of-place); solo para referencia del caller.
-        seed, bank_path, bank_profile, databank_dir, databank_max_n: Igual que GEMM.
-
-    Returns:
-        tuple[str, bool]: (ruta_archivo, es_persistente).
-    """
-    # ── Ruta primaria: DataBankManager ────────────────────────────────────────
-    try:
-        DataBankManager = _get_data_bank_manager_cls()
-        db_dir = databank_dir or DEFAULT_DATABANK_DIR
-        db_max = databank_max_n or DEFAULT_DATABANK_MAX_N
-        mgr = DataBankManager(base_dir=db_dir, max_n=db_max)
-        path = mgr.get_fft_path(nx, ny, nz, batch, precision, domain, profile=bank_profile)
-        return path, True
-    except Exception:
-        pass
-
-    # ── Fallback 1: banco HDF5 legacy (solo 1D) ───────────────────────────────
+    """Retorna la ruta a un archivo FFT kernel-ready o None para generación in-memory determinista."""
     if bank_path and ny == 0 and nz == 0:
         try:
             h5py = _require_h5py()
             dataset_root = f"/fft/N{nx}/{bank_profile}"
-            if domain == "C2C":
-                label = "c128" if precision == "D" else "c64"
-            elif domain == "R2C":
-                label = "f64" if precision == "D" else "f32"
-            else:
-                label = "c128" if precision == "D" else "c64"
+            label = "c128" if precision == "D" else ("f64" if precision == "D" and domain == "R2C" else "f32")
             dataset_key = f"{dataset_root}/{label}"
             if bank_dataset_exists(bank_path, dataset_key):
                 with h5py.File(bank_path, "r") as hf:
@@ -972,19 +889,7 @@ def generate_fft_matrix_file(
         except Exception:
             pass
 
-    # ── Fallback 2: generación aleatoria en memoria ───────────────────────────
-    if seed is not None:
-        random.seed(seed)
-    nreal = 1
-    for d in [nx, ny, nz]:
-        if d > 0:
-            nreal *= d
-    nreal *= batch
-    input_values = [complex(random.random(), random.random()) for _ in range(nreal)]
-    output_values = [0j] * nreal
-    return write_fft_matrix_file_from_arrays(
-        nx, ny, nz, batch, precision, domain, input_values, output_values
-    ), False
+    return None, False
 
 
 def run_gemm_warmup(cmd, timeout, warmup_runs, matrix_file=None):
@@ -1035,6 +940,10 @@ def run_single_case(
     )
 
     try:
+        sub_env = os.environ.copy()
+        if seed is not None:
+            sub_env["BENCH_SEED"] = str(seed)
+
         # Build binary execution command using CLI flags (allows specifying --warmup 0 --iters 1)
         cmd = [
             binary,
@@ -1044,10 +953,11 @@ def run_single_case(
             "--precision", precision,
             "--op-a", op_a,
             "--op-b", op_b,
-            "--source", matrix_file,
             "--warmup", "0",
             "--iters", "0" if not is_warmup else "1"
         ]
+        if matrix_file:
+            cmd.extend(["--source", matrix_file])
 
         if is_warmup:
             # 1. Warmup Run: Execute the binary once with 0 warmups, 1 iter, and no telemetry
@@ -1057,6 +967,7 @@ def run_single_case(
                 text=True,
                 timeout=timeout,
                 check=False,
+                env=sub_env,
             )
             if proc.returncode != 0:
                 raise RuntimeError(
@@ -1073,6 +984,7 @@ def run_single_case(
             text=True,
             timeout=timeout,
             check=False,
+            env=sub_env,
         )
         if proc_iso.returncode != 0:
             raise RuntimeError(
@@ -1138,6 +1050,7 @@ def run_single_case(
                 text=True,
                 timeout=timeout,
                 check=False,
+                env=sub_env,
             )
         finally:
             stop_event.set()
@@ -1223,7 +1136,7 @@ def run_single_case(
         }
     finally:
         # Solo eliminar el archivo si es temporal (no proviene del DataBankManager).
-        if not _gemm_file_is_persistent and os.path.exists(matrix_file):
+        if matrix_file and not _gemm_file_is_persistent and os.path.exists(matrix_file):
             os.unlink(matrix_file)
 
 
@@ -1243,7 +1156,12 @@ def run_single_case_fft(
     is_warmup,
     timeout,
     matrix_file,
+    seed=None,
 ):
+    sub_env = os.environ.copy()
+    if seed is not None:
+        sub_env["BENCH_SEED"] = str(seed)
+
     # Construct binary execution command using positional arguments:
     # Nx Ny Nz Batch Precision Domain Direction Layout Warmup Iters Plan [matrix_file]
     cmd = [
@@ -1274,6 +1192,7 @@ def run_single_case_fft(
             text=True,
             timeout=timeout,
             check=False,
+            env=sub_env,
         )
         if proc.returncode != 0:
             raise RuntimeError(
@@ -1290,6 +1209,7 @@ def run_single_case_fft(
         text=True,
         timeout=timeout,
         check=False,
+        env=sub_env,
     )
 
     if proc_iso.returncode != 0:
@@ -1361,6 +1281,7 @@ def run_single_case_fft(
             text=True,
             timeout=timeout,
             check=False,
+            env=sub_env,
         )
     finally:
         stop_event.set()
@@ -1801,6 +1722,7 @@ def run_fft(args):
                                     True, # is_warmup
                                     args.timeout,
                                     matrix_file,
+                                    seed=args.seed,
                                 )
                                 print(f"[{done}/{total}] {device.upper()} Nx={nx} Ny={ny} Nz={nz} Batch={batch} P={precision} D={domain} Dir={direction} L={layout} Rep={rep} [WARMUP ONLY]")
                                 continue
@@ -1823,6 +1745,7 @@ def run_fft(args):
                                         True, # is_warmup
                                         args.timeout,
                                         matrix_file,
+                                        seed=args.seed,
                                     )
 
                                 # 2. Measurement (is_warmup = False)
@@ -1842,6 +1765,7 @@ def run_fft(args):
                                     False, # is_warmup
                                     args.timeout,
                                     matrix_file,
+                                    seed=args.seed,
                                 )
 
                             row = {key: result.get(key, 0.0) for key in fieldnames if key not in ["Device", "Iteration"]}
