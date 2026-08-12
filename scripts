@@ -1,3 +1,14 @@
+Compiladores
+fft cpu 
+gcc -O3 -fopenmp -o algoritmos/fft_cpu algoritmos/fft_cpu.c -lfftw3_omp -lfftw3f_omp -lfftw3 -lfftw3f -lm
+gemm cpu
+gcc -O3 -march=native -o algoritmos/gemm_cpu algoritmos/gemm_cpu.c -lmkl_rt -lpthread -lm
+
+fft gpu
+nvcc -O3 -o algoritmos/fft_gpu algoritmos/fft_gpu.cu -lcufft
+
+gemm gpu
+nvcc -O3 -o algoritmos/gemm_gpu algoritmos/gemm_gpu.cu -lcublas
 
 Ejecuta fft:
 completo: 
@@ -8,7 +19,7 @@ Min - Max
 2^12 - 2^26
 4096 - 67108864
 sudo python3 benchmark_runner.py --benchmark fft     --mode continuous-rl     --device both     --fft-sizes-1d auto     --fft-sizes-3d ""     --fft-sizes-2d ""
-
+z
 Para 2D: (7200 cpu +  gpu)
 Min - Max
 64x64 - 8192x8192 
