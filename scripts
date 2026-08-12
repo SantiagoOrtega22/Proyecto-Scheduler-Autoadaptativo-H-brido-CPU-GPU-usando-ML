@@ -1,7 +1,9 @@
 Compiladores
 fft cpu 
 gcc -O3 -fopenmp -o algoritmos/fft_cpu algoritmos/fft_cpu.c -lfftw3_omp -lfftw3f_omp -lfftw3 -lfftw3f -lm
-gemm cpu
+gemm cpu (OpenBLAS)
+gcc -O3 -march=native -o algoritmos/gemm_cpu algoritmos/gemm_cpu.c -I/usr/include/openblas -lopenblas -lm
+gemm cpu (Intel MKL)
 gcc -O3 -march=native -o algoritmos/gemm_cpu algoritmos/gemm_cpu.c -lmkl_rt -lpthread -lm
 
 fft gpu
@@ -19,7 +21,7 @@ Min - Max
 2^12 - 2^26
 4096 - 67108864
 sudo python3 benchmark_runner.py --benchmark fft     --mode continuous-rl     --device both     --fft-sizes-1d auto     --fft-sizes-3d ""     --fft-sizes-2d ""
-z
+
 Para 2D: (7200 cpu +  gpu)
 Min - Max
 64x64 - 8192x8192 
@@ -45,15 +47,16 @@ Python: 3.14.6
 numpy: 2.4.4
 pandas: 3.0.3
 scipy: 1.17.1
-pynvml: 13.0.1 (soporta también nvidia-ml-py v13.595.45)
+nvidia-ml-py: 13.595.45 (o pynvml v13.0.1)
 matplotlib: 3.10.9
 2. Compiladores
-GCC (C/C++): 15.2.1
+GCC (C/C++): 15.3.1 (incluye OpenMP / libgomp)
 NVCC (NVIDIA CUDA Compiler): CUDA 13.2 (V13.2.51)
 3. Librerías de Cómputo Cero/Bajo Nivel (HPC / GPU)
-FFTW3 (CPU): v3.x (libfftw3.so.3)
+FFTW3 (CPU): v3.x (libfftw3.so.3 + libfftw3_omp / libfftw3f_omp para OpenMP)
 OpenBLAS (CPU): libopenblas.so.0 / libopenblasp.so
 cuBLAS (GPU): v13 (libcublas.so.13)
 cuFFT (GPU): v12 (libcufft.so.12)
 
-pip install numpy pandas scipy pynvml matplotlib
+pip install numpy pandas scipy nvidia-ml-py matplotlib
+
