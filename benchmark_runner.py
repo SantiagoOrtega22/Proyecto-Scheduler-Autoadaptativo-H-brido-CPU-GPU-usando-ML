@@ -1229,8 +1229,6 @@ def run_single_case_fft(
     ops = fft_flops(dims, domain) * batch
     gflops = (ops / time_sec) / 1e9
     edp = energy_j * time_sec
-    payload_bytes = fft_payload_bytes(dims, batch, precision, domain, layout)
-    radix_class = fft_radix_class(dims)
 
     return {
         "Device": device,
@@ -1247,9 +1245,6 @@ def run_single_case_fft(
         "Avg_Power_W": avg_power_w,
         "Energy_J": energy_j,
         "EDP": edp,
-        "Payload_Bytes": payload_bytes,
-        "Radix_Class": radix_class,
-        "Samples_Power": len(samples) if device == "gpu" else (2 * len(rapl_paths) if rapl_paths else 0),
         "Wall_Elapsed_sec": end_wall - start_wall,
     }
 
@@ -1540,9 +1535,6 @@ def run_fft(args):
             "Avg_Power_W",
             "Energy_J",
             "EDP",
-            "Payload_Bytes",
-            "Radix_Class",
-            "Samples_Power",
         ])
 
         cases = []
