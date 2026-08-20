@@ -109,11 +109,18 @@ def measure_idle_power(duration_sec: float = 2.0) -> float:
 
     energy_total_j = 0.0
     for i in range(len(energy_paths)):
-        diff = (e1_list[i] - e0_list[i]) / 1e6
-        if diff < 0:
-            raise RuntimeError(
-                "RAPL energy counter rollover detected during idle measurement."
-            )
+        if e1_list[i] >= e0_list[i]:
+            diff = (e1_list[i] - e0_list[i]) / 1e6
+        else:
+            max_range_path = energy_paths[i].replace("energy_uj", "max_energy_range_uj")
+            try:
+                with open(max_range_path, "r") as f_max:
+                    max_range = int(f_max.read().strip())
+                diff = ((e1_list[i] + max_range) - e0_list[i]) / 1e6
+            except Exception:
+                raise RuntimeError(
+                    "RAPL energy counter rollover detected, but failed to read max_energy_range_uj."
+                )
         energy_total_j += diff
 
     return energy_total_j / elapsed

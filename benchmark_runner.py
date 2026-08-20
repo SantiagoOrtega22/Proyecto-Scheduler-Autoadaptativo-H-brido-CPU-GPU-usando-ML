@@ -975,7 +975,17 @@ def run_single_case(
                     for i, p in enumerate(rapl_paths):
                         with open(p, "r") as f:
                             val = int(f.read().strip())
-                        diff = max(0.0, (val - e0_list[i]) / 1e6)
+                        if val >= e0_list[i]:
+                            diff = (val - e0_list[i]) / 1e6
+                        else:
+                            # Rollover occurred
+                            max_range_path = p.replace("energy_uj", "max_energy_range_uj")
+                            try:
+                                with open(max_range_path, "r") as f_max:
+                                    max_range = int(f_max.read().strip())
+                                diff = ((val + max_range) - e0_list[i]) / 1e6
+                            except Exception:
+                                diff = max(0.0, (val - e0_list[i]) / 1e6)
                         energy_total_j += diff
 
                     power_window_sec = t1 - t0
@@ -1202,7 +1212,17 @@ def run_single_case_fft(
                 for i, p in enumerate(rapl_paths):
                     with open(p, "r") as f:
                         val = int(f.read().strip())
-                    diff = max(0.0, (val - e0_list[i]) / 1e6)
+                    if val >= e0_list[i]:
+                        diff = (val - e0_list[i]) / 1e6
+                    else:
+                        # Rollover occurred
+                        max_range_path = p.replace("energy_uj", "max_energy_range_uj")
+                        try:
+                            with open(max_range_path, "r") as f_max:
+                                max_range = int(f_max.read().strip())
+                            diff = ((val + max_range) - e0_list[i]) / 1e6
+                        except Exception:
+                            diff = max(0.0, (val - e0_list[i]) / 1e6)
                     energy_total_j += diff
 
                 power_window_sec = t1 - t0
