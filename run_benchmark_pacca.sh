@@ -62,9 +62,11 @@ echo "[4/4] Ejecutando Benchmarks RL..."
 
 echo "=================== EJECUCIÓN GEMM ==================="
 python3 benchmark_runner.py --benchmark gemm --mode continuous-rl --device both
+python3 -u benchmark_runner.py --benchmark gemm --mode continuous-rl --device both
 
 echo "=================== EJECUCIÓN FFT ===================="
 python3 benchmark_runner.py --benchmark fft \
+python3 -u benchmark_runner.py --benchmark fft \
     --mode continuous-rl \
     --device both \
     --fft-sizes-1d auto \
