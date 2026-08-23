@@ -60,3 +60,12 @@ cuFFT (GPU): v12 (libcufft.so.12)
 
 pip install numpy pandas scipy nvidia-ml-py matplotlib
 
+modulos pacca:
+
+module purge
+module load gnu12/12.4.0 devtools/nvidia/hpc_sdk/nvhpc/23.1 devtools/intel/oneapi/2023 Analytics/anaconda3/python3
+conda activate hpc-gemm
+
+compilado pacca
+gemm cpu
+gcc -O3 -march=native -I/opt/ohpc/pub/libs/gnu12/openblas/0.3.21/include -o algoritmos/gemm_cpu algoritmos/gemm_cpu.c -L/opt/ohpc/pub/compiler/gcc/12.4.0/lib64 -L/opt/ohpc/pub/libs/gnu12/openblas/0.3.21/lib -lopenblas -lgomp -lpthread -lm

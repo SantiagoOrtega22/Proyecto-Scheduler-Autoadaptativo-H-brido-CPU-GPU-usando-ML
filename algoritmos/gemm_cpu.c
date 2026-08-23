@@ -33,6 +33,7 @@
 #include <time.h>
 #include <cblas.h>
 #include <complex.h>
+#include <mkl.h>
 
 #define GEMM_WARMUP_RUNS 4
 #define GEMM_MEASURE_ITERS 1
