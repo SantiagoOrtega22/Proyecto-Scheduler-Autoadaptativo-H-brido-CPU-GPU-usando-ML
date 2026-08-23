@@ -69,10 +69,13 @@ class PlanificadorEnv(gym.Env):
         self.estado_actual = self.cola_tareas[0]["obs"] if not terminated else np.zeros(22, dtype=np.float32)
 
         info = {
+            "dispositivo": "cpu" if action == 0 else "gpu",
             "edp": edp_medido,
             "energia": energia_joules,
             "latencia": tiempo_segundos,
             "device": "cpu" if action == 0 else "gpu",
+            "energia_J": energia_joules,
+            "tiempo_s": tiempo_segundos,
         }
         return self.estado_actual, float(reward), terminated, truncated, info
 
