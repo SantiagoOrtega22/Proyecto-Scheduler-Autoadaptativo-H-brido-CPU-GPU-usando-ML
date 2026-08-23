@@ -67,5 +67,19 @@ module load gnu12/12.4.0 devtools/nvidia/hpc_sdk/nvhpc/23.1 devtools/intel/oneap
 conda activate hpc-gemm
 
 compilado pacca
-gemm cpu
-gcc -O3 -march=native -I/opt/ohpc/pub/libs/gnu12/openblas/0.3.21/include -o algoritmos/gemm_cpu algoritmos/gemm_cpu.c -L/opt/ohpc/pub/compiler/gcc/12.4.0/lib64 -L/opt/ohpc/pub/libs/gnu12/openblas/0.3.21/lib -lopenblas -lgomp -lpthread -lm
+gemm cpu (cambiando #include cblas.h por mkl.h)
+gcc -O3 -march=native -I$MKLROOT/include -o algoritmos/gemm_cpu algoritmos/gemm_cpu.c -L$MKLROOT/lib/intel64 -lmkl_intel_lp64 -lmkl_gnu_thread -lmkl_core -lgomp -lpthread -lm
+
+gemm gpu
+nvcc -O3 -o algoritmos/gemm_gpu algoritmos/gemm_gpu.cu -lcublas
+
+fft cpu
+gcc -O3 -fopenmp \
+    -I/opt/ohpc/pub/libs/gnu12/mpich/fftw/3.3.10/include \
+    -o algoritmos/fft_cpu algoritmos/fft_cpu.c \
+    -L/opt/ohpc/pub/libs/gnu12/mpich/fftw/3.3.10/lib \
+    -Wl,-rpath,/opt/ohpc/pub/libs/gnu12/mpich/fftw/3.3.10/lib \
+    -lfftw3_omp -lfftw3f_omp -lfftw3 -lfftw3f -lm
+    
+fft gpu 
+nvcc -O3 -o algoritmos/fft_gpu algoritmos/fft_gpu.cu -lcufft
