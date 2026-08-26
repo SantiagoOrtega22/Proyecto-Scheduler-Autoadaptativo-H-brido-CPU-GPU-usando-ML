@@ -11,7 +11,7 @@ class PlanificadorEnv(gym.Env):
     def __init__(
         self,
         csv_path: str | None = None,
-        tamano_lote: int = 10,
+        tamano_lote: int = 100,
         shuffle: bool = True,
     ) -> None:
         super().__init__()
@@ -54,7 +54,14 @@ class PlanificadorEnv(gym.Env):
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict]:
         tarea_actual = self.cola_tareas.pop(0)
 
-        # Extracción de métricas para la acción ejecutada (0: CPU, 1: GPU)
+        # Extracción de métricas para la acción ejecutada y cálculo del óptimo
+        edp_cpu = float(tarea_actual["metricas"][0]["edp"])
+        edp_gpu = float(tarea_actual["metricas"][1]["edp"])
+        
+        # El óptimo es el dispositivo con el menor EDP
+        accion_optima = 0 if edp_cpu <= edp_gpu else 1
+        es_optimo = 1.0 if action == accion_optima else 0.0
+
         metricas = tarea_actual["metricas"][action]
         energia_joules = float(metricas["energia"])
         tiempo_segundos = float(metricas["tiempo"])
@@ -71,11 +78,9 @@ class PlanificadorEnv(gym.Env):
         info = {
             "dispositivo": "cpu" if action == 0 else "gpu",
             "edp": edp_medido,
-            "energia": energia_joules,
-            "latencia": tiempo_segundos,
-            "device": "cpu" if action == 0 else "gpu",
             "energia_J": energia_joules,
             "tiempo_s": tiempo_segundos,
+            "es_optimo": es_optimo
         }
         return self.estado_actual, float(reward), terminated, truncated, info
 

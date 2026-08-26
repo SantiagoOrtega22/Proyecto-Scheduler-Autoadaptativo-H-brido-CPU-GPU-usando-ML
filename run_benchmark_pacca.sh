@@ -3,6 +3,7 @@
 #SBATCH --partition=GPU
 #SBATCH --nodelist=paccaA100
 #SBATCH --nodes=1
+#SBATCH --exclusive
 #SBATCH --ntasks=32
 #SBATCH --gres=gpu:1
 #SBATCH --output=benchmark_hpc_%j.log
@@ -60,8 +61,8 @@ module load devtools/nvidia/hpc_sdk/nvhpc/23.1
 # 4. Ejecución de Benchmarks
 echo "[4/4] Ejecutando Benchmarks RL..."
 
-echo "=================== EJECUCIÓN GEMM ==================="
-python3 -u benchmark_runner.py --benchmark gemm --mode continuous-rl --device both
+#echo "=================== EJECUCIÓN GEMM ==================="
+#python3 -u benchmark_runner.py --benchmark gemm --mode continuous-rl --device both
 
 echo "=================== EJECUCIÓN FFT ===================="
 python3 -u benchmark_runner.py --benchmark fft \

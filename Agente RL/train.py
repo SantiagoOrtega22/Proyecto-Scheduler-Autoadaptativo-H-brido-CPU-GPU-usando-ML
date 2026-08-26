@@ -8,6 +8,32 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from Entorno.gym import PlanificadorEnv
 
+from stable_baselines3.common.callbacks import BaseCallback
+import numpy as np
+
+class PrecisionCallback(BaseCallback):
+    """
+    Callback personalizado para calcular la precisión (% de veces que el agente 
+    elige el dispositivo con el menor EDP) y registrarla en TensorBoard.
+    """
+    def __init__(self, verbose=0):
+        super(PrecisionCallback, self).__init__(verbose)
+        self.es_optimo_history = []
+        
+    def _on_step(self) -> bool:
+        # Extraer el flag 'es_optimo' del diccionario 'info' del entorno
+        for info in self.locals.get("infos", []):
+            if "es_optimo" in info:
+                self.es_optimo_history.append(info["es_optimo"])
+                
+        # Calcular y registrar en TensorBoard cada 100 pasos
+        if len(self.es_optimo_history) >= 100:
+            precision = np.mean(self.es_optimo_history)
+            self.logger.record("metricas_personalizadas/precision", precision)
+            self.es_optimo_history = []  # Limpiar buffer
+            
+        return True
+
 def entrenar_agente() -> None:
     """
     Instancia el entorno PlanificadorEnv y entrena un agente DQN 
@@ -19,7 +45,7 @@ def entrenar_agente() -> None:
     
     # 1. Definir rutas relativas al proyecto
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    csv_path = os.path.join(base_dir, "Entorno", "dataset_rl.csv")
+    csv_path = os.path.join(base_dir, "Entorno", "dataset_pacca.csv")
     log_dir = os.path.join(base_dir, "logs_entrenamiento")
     modelo_path = os.path.join(base_dir, "modelo_dqn_scheduler")
     
@@ -38,11 +64,11 @@ def entrenar_agente() -> None:
     modelo = DQN(
         policy="MlpPolicy",          # Red Neuronal Multicapa estándar (Perceptrón Multicapa)
         env=env, 
-        learning_rate=1e-3,          # Tasa de aprendizaje de la red neuronal
+        learning_rate=1e-4,          # Tasa de aprendizaje de la red neuronal
         buffer_size=10000,           # Capacidad de la memoria de repetición (Experience Replay)
         learning_starts=50,          # Acciones iniciales aleatorias para llenar el buffer
-        batch_size=32,               # Tamaño de lote (batch) al retropropagar gradientes
-        gamma=0.99,                  # Factor de descuento (visión a futuro de la política)
+        batch_size=128,               # Tamaño de lote (batch) al retropropagar gradientes
+        gamma=0.0,                  # Factor de descuento (visión a futuro de la política)
         exploration_fraction=0.3,    # Explorar (aleatorio) durante el 30% del entrenamiento
         exploration_initial_eps=1.0, # Comenzar 100% aleatorio (exploración pura)
         exploration_final_eps=0.05,  # Terminar con un 5% mínimo de exploración continua
@@ -55,9 +81,11 @@ def entrenar_agente() -> None:
     # Entrenaremos durante 5000 pasos lógicos a modo de prueba inicial.
     # Dado que ahora el dataset tiene 9 filas, el agente iterará muchas veces sobre él 
     # simulando una cola infinita de tareas entrantes.
-    timesteps = 5000
+    timesteps = 50000
     print(f"\n--- Iniciando Aprendizaje por {timesteps} Pasos ---")
-    modelo.learn(total_timesteps=timesteps, progress_bar=True)
+    
+    callback_precision = PrecisionCallback()
+    modelo.learn(total_timesteps=timesteps, progress_bar=True, callback=callback_precision)
     
     # 5. Guardar el modelo entrenado a disco
     modelo.save(modelo_path)

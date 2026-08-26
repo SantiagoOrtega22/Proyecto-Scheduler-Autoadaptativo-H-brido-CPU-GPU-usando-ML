@@ -61,40 +61,48 @@ def generar_vector_22d(task_info):
     
     return obs
 
-def procesar_csvs():
+def procesar_csvs(csv_gemm=None, csv_fft=None, csv_salida=None):
     base_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.abspath(os.path.join(base_dir, "../../"))
     
-    csv_gemm = os.path.join(project_root, "benchmark_results.csv")
-    csv_fft = os.path.join(project_root, "fft_benchmark_results.csv")
-    csv_salida = os.path.join(base_dir, "dataset_rl.csv")
+    # Si no se pasó ninguno de los dos, usar los defaults originales
+    if csv_gemm is None and csv_fft is None:
+        csv_gemm = os.path.join(project_root, "benchmark_results.csv")
+        csv_fft = os.path.join(project_root, "fft_benchmark_results.csv")
+    if csv_salida is None:
+        csv_salida = os.path.join(base_dir, "dataset_rl.csv")
 
     gemm_tasks = defaultdict(dict)
     fft_tasks = defaultdict(dict)
 
     # Procesar GEMM
-    if os.path.exists(csv_gemm):
+    if csv_gemm and os.path.exists(csv_gemm):
         print(f"Procesando {csv_gemm}...")
         with open(csv_gemm, 'r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
             for row in reader:
+                # Filtrar rápido en caso de que le hayan pasado un CSV que no es de GEMM
+                if 'M' not in row:
+                    continue
                 # La clave identifica unívocamente la configuración de la tarea
-                key = (row['M'], row['N'], row['K'], row['Precision'], row['OpA'], row['OpB'])
-                device = row['Device'].lower()
+                key = (row.get('M', 1), row.get('N', 1), row.get('K', 1), row.get('Precision', 'S'), row.get('OpA', 'N'), row.get('OpB', 'N'))
+                device = row.get('Device', 'cpu').lower()
                 gemm_tasks[key][device] = row
-    else:
+    elif csv_gemm:
         print(f"Advertencia: No se encontró {csv_gemm}")
 
     # Procesar FFT
-    if os.path.exists(csv_fft):
+    if csv_fft and os.path.exists(csv_fft):
         print(f"Procesando {csv_fft}...")
         with open(csv_fft, 'r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
             for row in reader:
-                key = (row['Nx'], row['Ny'], row['Nz'], row['Batch'], row['Precision'], row['Domain'], row['Direction'], row['Layout'])
-                device = row['Device'].lower()
+                if 'Nx' not in row:
+                    continue
+                key = (row.get('Nx', 1), row.get('Ny', 0), row.get('Nz', 0), row.get('Batch', 1), row.get('Precision', 'S'), row.get('Domain', 'C2C'), row.get('Direction', 'F'), row.get('Layout', 'I'))
+                device = row.get('Device', 'cpu').lower()
                 fft_tasks[key][device] = row
-    else:
+    elif csv_fft:
         print(f"Advertencia: No se encontró {csv_fft}")
 
     # Escribir salida combinada
@@ -170,4 +178,11 @@ def procesar_csvs():
     print(f"Proceso completado. Se escribieron {filas_escritas} tareas válidas emparejadas en el dataset.")
 
 if __name__ == "__main__":
-    procesar_csvs()
+    import argparse
+    parser = argparse.ArgumentParser(description="Convierte resultados de Benchmark CSV a un Dataset codificado para RL (One-Hot 22D).")
+    parser.add_argument("--gemm", type=str, help="Ruta al archivo CSV de resultados GEMM", default=None)
+    parser.add_argument("--fft", type=str, help="Ruta al archivo CSV de resultados FFT", default=None)
+    parser.add_argument("--out", type=str, help="Ruta al archivo CSV codificado de salida", default=None)
+    
+    args = parser.parse_args()
+    procesar_csvs(csv_gemm=args.gemm, csv_fft=args.fft, csv_salida=args.out)
