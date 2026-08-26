@@ -7,7 +7,9 @@ from stable_baselines3 import DQN
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from Entorno.gym import PlanificadorEnv
 
-def evaluar_agente():
+import argparse
+
+def evaluar_agente(num_muestras: int = 15):
     base_dir = os.path.dirname(os.path.abspath(__file__))
     modelo_path = os.path.join(base_dir, "modelo_dqn_scheduler.zip")
     csv_path = os.path.join(base_dir, "Entorno", "dataset_pacca.csv")
@@ -20,9 +22,9 @@ def evaluar_agente():
     print("Cargando el Cerebro del Scheduler (DQN)...")
     modelo = DQN.load(modelo_path)
 
-    # Inicializamos el entorno para que cargue una cola de 15 tareas al azar
-    print("Simulando llegada de 15 tareas al servidor...\n")
-    env = PlanificadorEnv(csv_path=csv_path, tamano_lote=15, shuffle=True)
+    # Inicializamos el entorno con la cantidad de muestras solicitada
+    print(f"Simulando llegada de {num_muestras} tareas al servidor...\n")
+    env = PlanificadorEnv(csv_path=csv_path, tamano_lote=num_muestras, shuffle=True)
     obs, info = env.reset()
     
     print("==================================================================")
@@ -46,10 +48,11 @@ def evaluar_agente():
 
         # 1. El modelo evalúa el estado y toma una decisión determinista (sin explorar)
         accion, _ = modelo.predict(obs, deterministic=True)
-        eleccion_ia = "CPU" if accion == 0 else "GPU"
+        accion_int = int(np.asarray(accion).item())
+        eleccion_ia = "CPU" if accion_int == 0 else "GPU"
         
         # 2. Ejecutamos la acción en el entorno
-        obs, reward, terminated, truncated, info = env.step(accion)
+        obs, reward, terminated, truncated, info = env.step(accion_int)
         
         # 3. Analizamos si la IA tomó la decisión correcta comparando con los datos reales
         edp_cpu = float(tarea_actual["metricas"][0]["edp"])
@@ -79,5 +82,13 @@ def evaluar_agente():
     print(f"==================================================================")
 
 if __name__ == "__main__":
-    evaluar_agente()
+    parser = argparse.ArgumentParser(description="Evaluar el Agente Scheduler DQN en vivo.")
+    parser.add_argument(
+        "-n", "--muestras",
+        type=int,
+        default=15,
+        help="Cantidad de tareas a evaluar (por defecto: 15)"
+    )
+    args = parser.parse_args()
+    evaluar_agente(num_muestras=args.muestras)
 

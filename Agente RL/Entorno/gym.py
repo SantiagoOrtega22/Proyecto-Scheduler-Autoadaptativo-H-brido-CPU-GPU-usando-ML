@@ -51,7 +51,10 @@ class PlanificadorEnv(gym.Env):
 
         return self.estado_actual, {}
 
-    def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict]:
+    def step(self, action: int | np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict]:
+        # Convertir a entero nativo de Python en caso de recibir numpy.ndarray o escalar
+        action_idx = int(np.asarray(action).item())
+
         tarea_actual = self.cola_tareas.pop(0)
 
         # Extracción de métricas para la acción ejecutada y cálculo del óptimo
@@ -60,9 +63,9 @@ class PlanificadorEnv(gym.Env):
         
         # El óptimo es el dispositivo con el menor EDP
         accion_optima = 0 if edp_cpu <= edp_gpu else 1
-        es_optimo = 1.0 if action == accion_optima else 0.0
+        es_optimo = 1.0 if action_idx == accion_optima else 0.0
 
-        metricas = tarea_actual["metricas"][action]
+        metricas = tarea_actual["metricas"][action_idx]
         energia_joules = float(metricas["energia"])
         tiempo_segundos = float(metricas["tiempo"])
         edp_medido = float(metricas["edp"])
