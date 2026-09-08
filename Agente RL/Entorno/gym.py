@@ -13,6 +13,9 @@ class PlanificadorEnv(gym.Env):
         csv_path: str | None = None,
         tamano_lote: int = 100,
         shuffle: bool = True,
+        holdout_fraction: float = 0.0,
+        split: str = "all",
+        split_seed: int = 42,
     ) -> None:
         super().__init__()
         self.tamano_lote = tamano_lote
@@ -34,8 +37,42 @@ class PlanificadorEnv(gym.Env):
         else:
             self._generar_dataset_sintetico()
 
+        if holdout_fraction > 0.0:
+            self.dataset_tareas = self._dividir_dataset(
+                self.dataset_tareas, holdout_fraction, split, split_seed
+            )
+
         self.cola_tareas: list[dict] = []
         self.estado_actual: np.ndarray | None = None
+
+    @staticmethod
+    def _dividir_dataset(
+        tareas: list[dict], holdout_fraction: float, split: str, seed: int
+    ) -> list[dict]:
+        """Separa deterministamente el dataset en un subconjunto de entrenamiento y
+        uno de reserva (holdout), para diagnosticar memorización vs. interpolación
+        de la frontera de decisión (ver DISENO_ENTORNO.md, diagnostico de holdout).
+
+        Args:
+            tareas: Lista completa de tareas cargadas del CSV.
+            holdout_fraction: Fracción (0.0-1.0) de tareas a reservar como holdout.
+            split: 'train' devuelve el complemento del holdout, 'holdout' devuelve
+                solo el holdout, cualquier otro valor devuelve todas las tareas.
+            seed: Semilla del muestreo (reutilizar BENCH_SEED para reproducibilidad).
+
+        Returns:
+            list[dict]: Subconjunto de tareas correspondiente al split solicitado.
+        """
+        rng = np.random.default_rng(seed)
+        indices = rng.permutation(len(tareas))
+        n_holdout = int(round(len(tareas) * holdout_fraction))
+        holdout_idx = set(indices[:n_holdout].tolist())
+
+        if split == "holdout":
+            return [t for i, t in enumerate(tareas) if i in holdout_idx]
+        if split == "train":
+            return [t for i, t in enumerate(tareas) if i not in holdout_idx]
+        return tareas
 
     def reset(self, seed: int | None = None, options: dict | None = None) -> tuple[np.ndarray, dict]:
         super().reset(seed=seed)
@@ -71,7 +108,7 @@ class PlanificadorEnv(gym.Env):
         edp_medido = float(metricas["edp"])
 
         # Función de recompensa logarítmica negativa
-        reward = -np.log(edp_medido + 1e-5)
+        reward = -np.log(edp_medido + 1e-9)
 
         # Transición al siguiente estado
         terminated = len(self.cola_tareas) == 0

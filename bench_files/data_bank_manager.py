@@ -41,6 +41,11 @@ import numpy as np
 # ── Constantes ────────────────────────────────────────────────────────────────
 SEED: int = 42
 
+# Desalineación intercalada para FFT 1D: rompe la resonancia de los tamaños N
+# con potencias de dos exactas, alternando su aplicación cada dos muestras
+# dentro de cada octava (ver generate_size_sweep).
+FFT_1D_OFFSET_DESALINEACION: int = 67
+
 _PREC_LABEL: dict = {"S": "s", "D": "d", "C": "c", "Z": "z"}
 _DOM_LABEL: dict = {"C2C": "c2c", "R2C": "r2c", "C2R": "c2r"}
 
@@ -68,8 +73,13 @@ def generate_size_sweep(max_n: Optional[int] = None, algorithm: str = "gemm") ->
         y un aumento de 2x por cada potencia de 2 (el rango [512, 1024) tiene salto de +16).
 
     Para FFT 1D ('fft' o 'fft_1d'):
-        Empieza desde 2^14 (16384) a 2^26 (67108864) con saltos desde +256 y un aumento de 2x
-        por cada potencia de 2, intercalando en cada salto una desalineación de +67.
+        Empieza desde 2^12 (4096) a 2^26 (67108864), con esquema de octavas de 32 puntos
+        por octava (step = ancho_octava / 32). Dentro de cada octava, el punto ancla
+        (j=0, la potencia de 2 exacta) y el primer punto regular (j=1) quedan limpios;
+        a partir de ahí se intercala una desalineación de +FFT_1D_OFFSET_DESALINEACION (67)
+        cada dos muestras (j par >= 2 recibe el offset, j impar no). La rejilla usada para
+        calcular el siguiente salto siempre se basa en el valor regular (sin offset), de modo
+        que el offset no se acumula de una muestra a la siguiente.
 
     Para FFT 2D ('fft_2d'):
         Rango de 16x16 (2^4) a 8192x8192 (2^13). Esquema de octavas con 32 puntos por octava.
@@ -127,15 +137,23 @@ def generate_size_sweep(max_n: Optional[int] = None, algorithm: str = "gemm") ->
             ancho_octava = interval_end - interval_start  # 2^k
             step_exact = ancho_octava / puntos_por_octava
             step = max(1, int(round(step_exact)))
-            
+
             n = interval_start
+            j = 0
             while n < interval_end and n <= limit_n:
-                sizes.append(n)
+                # j=0 (ancla de octava) y j=1 (primer salto regular) quedan limpios;
+                # desde j=2 se intercala +67 cada dos muestras. La variable `n` que
+                # alimenta el siguiente salto nunca se contamina con el offset.
+                aplica_offset = j > 0 and j % 2 == 0
+                valor = n + FFT_1D_OFFSET_DESALINEACION if aplica_offset else n
+                if valor <= limit_n:
+                    sizes.append(valor)
                 n += step
-                
+                j += 1
+
         if 2**26 <= limit_n and (not sizes or sizes[-1] < 67108864):
             sizes.append(67108864)
-            
+
         return sizes
 
     elif algo_lower in ("fft_2d", "fft_3d"):
