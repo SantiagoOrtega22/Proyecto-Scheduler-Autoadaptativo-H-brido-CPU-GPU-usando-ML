@@ -31,7 +31,8 @@
 #include <strings.h>
 #include <ctype.h>
 #include <time.h>
-#include <cblas.h>
+/*#include <cblas.h>*/
+#include <mkl.h>
 #include <complex.h>
 
 
