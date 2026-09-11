@@ -35,6 +35,34 @@ static double monotonic_time_sec(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
+/*
+ * Ventana de medicion energetica.
+ *
+ * El orquestador muestrea RAPL/NVML mientras el proceso esta vivo, pero solo el lazo
+ * cronometrado representa la carga que se quiere caracterizar: la creacion del plan,
+ * las reservas de memoria, la generacion determinista de datos y el cierre del proceso
+ * quedan fuera de esa carga. Publicamos los instantes CLOCK_MONOTONIC que delimitan el
+ * lazo para que el orquestador recorte las muestras a esa region; sin este recorte la
+ * energia del setup se atribuia al kernel e inflaba la potencia y la energia por
+ * iteracion (ver protocolo de aislamiento en CLAUDE.md seccion 4).
+ */
+static double g_loop_start_sec = 0.0;
+static double g_loop_end_sec = 0.0;
+static int g_loop_iters = 0;
+
+static void record_loop_window(double start_sec, double end_sec, int iters) {
+    g_loop_start_sec = start_sec;
+    g_loop_end_sec = end_sec;
+    g_loop_iters = iters;
+}
+
+static void print_loop_window(void) {
+    /* CLOCK_MONOTONIC es la misma fuente que time.perf_counter() en CPython/Linux,
+       asi que estas marcas son directamente comparables con las del orquestador. */
+    printf("LOOP_WINDOW start=%.9f end=%.9f iters=%d\n",
+           g_loop_start_sec, g_loop_end_sec, g_loop_iters);
+}
+
 /**
  * @brief Macro to check CUDA runtime API errors.
  * Evaluates the call and exits if it fails to ensure reliable execution.
@@ -394,6 +422,7 @@ static void print_result(const FftConfig *cfg, double time_sec, double gflops) {
         gflops,
         time_sec
     );
+    print_loop_window();
 }
 
 /**
@@ -532,6 +561,7 @@ static void benchmark_fft_float(const FftConfig *cfg) {
         CHECK_CUDA(cudaDeviceSynchronize());
         double end_time = monotonic_time_sec();
 
+        record_loop_window(start_time, end_time, run_iters);
         double time_sec = (end_time - start_time) / (double)run_iters;
         double gflops = flops / (time_sec * 1e9);
 
@@ -613,6 +643,7 @@ static void benchmark_fft_float(const FftConfig *cfg) {
         CHECK_CUDA(cudaDeviceSynchronize());
         double end_time = monotonic_time_sec();
 
+        record_loop_window(start_time, end_time, run_iters);
         double time_sec = (end_time - start_time) / (double)run_iters;
         double gflops = flops / (time_sec * 1e9);
 
@@ -690,6 +721,7 @@ static void benchmark_fft_float(const FftConfig *cfg) {
         CHECK_CUDA(cudaDeviceSynchronize());
         double end_time = monotonic_time_sec();
 
+        record_loop_window(start_time, end_time, run_iters);
         double time_sec = (end_time - start_time) / (double)run_iters;
         double gflops = flops / (time_sec * 1e9);
 
@@ -844,6 +876,7 @@ static void benchmark_fft_double(const FftConfig *cfg) {
         CHECK_CUDA(cudaDeviceSynchronize());
         double end_time = monotonic_time_sec();
 
+        record_loop_window(start_time, end_time, run_iters);
         double time_sec = (end_time - start_time) / (double)run_iters;
         double gflops = flops / (time_sec * 1e9);
 
@@ -925,6 +958,7 @@ static void benchmark_fft_double(const FftConfig *cfg) {
         CHECK_CUDA(cudaDeviceSynchronize());
         double end_time = monotonic_time_sec();
 
+        record_loop_window(start_time, end_time, run_iters);
         double time_sec = (end_time - start_time) / (double)run_iters;
         double gflops = flops / (time_sec * 1e9);
 
@@ -1002,6 +1036,7 @@ static void benchmark_fft_double(const FftConfig *cfg) {
         CHECK_CUDA(cudaDeviceSynchronize());
         double end_time = monotonic_time_sec();
 
+        record_loop_window(start_time, end_time, run_iters);
         double time_sec = (end_time - start_time) / (double)run_iters;
         double gflops = flops / (time_sec * 1e9);
 

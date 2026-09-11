@@ -47,18 +47,41 @@ Columnas generadas incluyen detalles específicos (M,N,K para GEMM; Nx,Ny,Nz,Bat
     Time_sec, GFLOPS, Avg_Power_W, Energy_J, EDP
 
 Interpretacion:
-    Time_sec     -> Tiempo puro de ejecución del kernel, medido en fase de aislamiento de métricas.
-    GFLOPS       -> Rendimiento calculado a partir de las dimensiones, la precisión y Time_sec.
-    Avg_Power_W  -> Potencia media consumida durante la fase secundaria de monitoreo activo.
-    Energy_J     -> Energía total gastada (calculada integrando muestras NVML/RAPL).
-    EDP          -> Producto Energía-Retraso (Energy-Delay Product = Energy_J * Time_sec).
+    Time_sec        -> Tiempo puro de ejecución del kernel, medido en fase de aislamiento de métricas.
+    GFLOPS          -> Rendimiento calculado a partir de las dimensiones, la precisión y Time_sec.
+    Avg_Power_W     -> Potencia media ACTIVA (ya descontada la potencia en reposo) durante el lazo medido.
+    Energy_J        -> Energía de UNA ejecución: Avg_Power_W * Time_sec.
+    EDP             -> Producto Energía-Retardo (Energy-Delay Product = Energy_J * Time_sec).
+    Loop_Window_sec -> Duración real de la ventana sobre la que se integró la telemetría.
+    Iters_K         -> Iteraciones ejecutadas dentro de esa ventana.
+    Power_Samples   -> Muestras crudas de RAPL/NVML que cayeron dentro de la ventana.
+    Idle_Power_W    -> Línea base en reposo descontada para obtener la potencia activa.
+    Wall_Elapsed_sec-> Duración total del subproceso (incluye setup y cierre; solo auditoría).
+
+Las cinco últimas columnas existen para poder auditar a posteriori que la energía se
+integró sobre el lazo y no sobre el proceso completo.
 
 NOTAS HPC Y RIGOR
 -----------------
     - Aislamiento de Métricas: Cada prueba ejecuta el binario dos veces. La primera (sin hilos de monitoreo) obtiene el tiempo exacto; la segunda (con hilos de lectura NVML/RAPL activos) extrae el perfil energético.
     - Warm-ups: Se corren iteraciones previas (por defecto 4) para inicializar bibliotecas (cuBLAS/FFTW) y estabilizar relojes/Turbo Boost.
-    - Consumo en GPU: Se calcula a partir del API de NVML.
-    - Consumo en CPU: Usa un hilo demonio inactivo que intercepta lecturas precisas de Intel RAPL en /sys/class/powercap.
+    - Ventana de medición: el muestreo cubre todo el subproceso, pero la energía se integra
+      SOLO entre las marcas LOOP_WINDOW que publican los binarios, que delimitan el lazo
+      cronometrado. Sin ese recorte, la energía del arranque del proceso, la creación del
+      plan, las reservas de memoria y el cierre se atribuía al kernel: en GPU diluía la
+      potencia hacia el reposo y en CPU la inflaba por encima del límite físico del socket.
+      Requiere binarios recompilados; si falta la marca, la medición se omite con aviso.
+    - Línea base en reposo: se mide la potencia idle de CPU y GPU al inicio del barrido
+      (o se fija con --idle-power-cpu / --idle-power-gpu) y se descuenta de la ventana,
+      de modo que Avg_Power_W refleja solo el consumo atribuible al cómputo. El descuento
+      es simétrico entre dispositivos para que la comparación CPU/GPU sea justa.
+    - Coherencia interna: por construcción Energy_J = Avg_Power_W * Time_sec y
+      EDP = Energy_J * Time_sec, con Time_sec proveniente de la fase sin telemetría.
+    - Consumo en GPU: muestreo continuo de nvmlDeviceGetPowerUsage() e integración
+      trapezoidal de la curva de potencia recortada a la ventana del lazo.
+    - Consumo en CPU: muestreo continuo de los contadores acumulados Intel RAPL
+      (/sys/class/powercap, todos los sockets package), interpolando el contador en
+      ambos bordes de la ventana y tomando la diferencia.
     - Tolerancia Zero-Time: Tiempos reportados de ejecución por debajo del microsegundo (0.0s) se reajustan internamente al límite teórico de 1 nanosegundo (1e-9) para evitar crasheos (ZeroDivisionError) en barridos masivos de arrays mínimos.
 """
 
@@ -77,6 +100,7 @@ import statistics
 import struct
 import random
 import tempfile
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import pynvml
 
@@ -300,8 +324,42 @@ FFT_TIME_PATTERN = re.compile(
 )
 
 _RAPL_WARNING_SHOWN = False
+_RAPL_RANGE_WARNING_SHOWN = False
+
+# Intervalo de muestreo NVML. El sensor de potencia de la GPU tiene su propia latencia
+# de refresco (~10-20 ms), asi que muestrear mas rapido no aporta resolucion real.
 POWER_SAMPLE_INTERVAL_SEC = 0.02
+# RAPL actualiza energy_uj cada ~1 ms. Como es un CONTADOR ACUMULADO y no una lectura
+# instantanea, muestrear mas lento que esa tasa no pierde energia: el contador integra
+# todo lo ocurrido entre lecturas. El intervalo solo fija la precision con la que se
+# interpolan los BORDES de la ventana, con un error acotado por (intervalo x salto de
+# potencia en el borde) -> ~0.4% en una ventana de 0.5 s. Bajarlo a 1 ms no compensa:
+# multiplicaria por cinco las lecturas de sysfs, perturbando la propia medicion, y no
+# puede superar la granularidad de 1 ms del contador.
+RAPL_SAMPLE_INTERVAL_SEC = 0.005
+# Duracion objetivo del lazo bajo monitoreo. Cuanto mas larga, mejor relacion
+# senal-ruido de la telemetria, a costa de tiempo total de barrido.
+POWER_WINDOW_TARGET_SEC = 0.5
+# Minimo de muestras crudas dentro de la ventana para aceptar la medicion.
+MIN_SAMPLES_IN_WINDOW = 2
+# Divergencia tolerada entre el tiempo por iteracion de la fase de aislamiento y el
+# de la fase de potencia. Superarla no invalida el dato, pero avisa de que el estado
+# del dispositivo (turbo, cache, relojes) no fue estable entre ambas fases.
+LOOP_TIME_DIVERGENCE_WARN = 0.25
+# Margen bajo la linea base de reposo que se acepta como ruido antes de invalidar la
+# medicion. Por debajo de esto la linea base es fisicamente imposible.
+IDLE_BASELINE_TOLERANCE = 0.99
+# Potencias en reposo. Se restan para reportar solo la potencia atribuible al computo;
+# se miden al inicio del barrido salvo que se fijen explicitamente por CLI.
 IDLE_POWER_CPU = 0.0
+IDLE_POWER_GPU = 0.0
+
+# Marca que publican los binarios para delimitar el lazo cronometrado. Sin ella la
+# telemetria abarcaria tambien el arranque del proceso, la creacion del plan, las
+# reservas de memoria y el cierre, cuya energia no pertenece al kernel medido.
+LOOP_WINDOW_PATTERN = re.compile(
+    r"LOOP_WINDOW\s+start=([0-9.eE+-]+)\s+end=([0-9.eE+-]+)\s+iters=([0-9]+)"
+)
 
 DEFAULT_DATABANK_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bench_files", "databank")
 DEFAULT_DATABANK_MAX_N = 67108864
@@ -312,11 +370,31 @@ def warn_rapl_missing_once():
     if _RAPL_WARNING_SHOWN:
         return
     print(
-        "Aviso: no se encontro energy_uj RAPL en /sys/class/powercap; "
-        "se continuara sin metrica de energia para CPU.",
+        "Aviso: no se encontro energy_uj RAPL legible en /sys/class/powercap; "
+        "las mediciones de CPU se omitiran por falta de telemetria.",
         file=sys.stderr,
     )
     _RAPL_WARNING_SHOWN = True
+
+
+def warn_rapl_range_missing_once(path: str) -> None:
+    """Avisa una sola vez si no se puede leer el rango de vuelta del contador RAPL.
+
+    Sin max_energy_range_uj no se puede reconstruir la energia de un reinicio del
+    contador, asi que esa fraccion se perderia en silencio.
+
+    Args:
+        path: Ruta del contador energy_uj afectado.
+    """
+    global _RAPL_RANGE_WARNING_SHOWN
+    if _RAPL_RANGE_WARNING_SHOWN:
+        return
+    print(
+        f"Aviso: no se pudo leer max_energy_range_uj para {path}; si el contador da la "
+        "vuelta durante una medicion, esa energia no podra reconstruirse.",
+        file=sys.stderr,
+    )
+    _RAPL_RANGE_WARNING_SHOWN = True
 
 
 def parse_sizes(raw):
@@ -556,6 +634,13 @@ def monitor_power_gpu(handle, stop_event, power_queue):
         if stop_event.wait(POWER_SAMPLE_INTERVAL_SEC):
             break
 
+    # El lazo medido termina antes de que el proceso salga, asi que tomamos una muestra
+    # posterior a la senal de parada para poder interpolar el borde derecho de la ventana.
+    try:
+        raw_samples.append((time.perf_counter(), int(pynvml.nvmlDeviceGetPowerUsage(handle))))
+    except Exception:
+        pass
+
     # Si tenemos menos de 2 muestras, hacemos un muestreo en ráfaga rápido
     if len(raw_samples) < 2:
         extra = []
@@ -646,57 +731,488 @@ def average_power_from_samples(samples):
     return area / duration
 
 
-def average_and_energy_from_samples(samples):
-    # Devuelve (avg_power_w, energy_j) integrando las muestras temporizadas.
-    # samples: list of (timestamp, power_w)
-    if not samples:
-        return 0.0, 0.0
-    if len(samples) == 1:
-        # No duration info: treat as instantaneous power, energy undefined (0)
-        return samples[0][1], 0.0
+class MeasurementError(RuntimeError):
+    """Fallo recuperable de telemetria: la iteracion se salta sin abortar el barrido."""
 
+
+def parse_loop_window(stdout: str, context: str) -> Tuple[float, float, int]:
+    """Extrae la ventana del lazo cronometrado que publica el binario.
+
+    Args:
+        stdout: Salida estandar de la ejecucion monitorizada.
+        context: Descripcion del caso, usada en los mensajes de error.
+
+    Returns:
+        Tupla (inicio, fin, iteraciones) con los instantes CLOCK_MONOTONIC que
+        delimitan exactamente el lazo medido.
+
+    Raises:
+        MeasurementError: Si el binario no publico la marca LOOP_WINDOW (binario sin
+            recompilar) o si la ventana resulta degenerada.
+    """
+    match = LOOP_WINDOW_PATTERN.search(stdout)
+    if not match:
+        raise MeasurementError(
+            f"El binario no publico LOOP_WINDOW para {context}. Recompila los binarios: "
+            "sin esa marca la telemetria no puede acotarse al lazo medido."
+        )
+
+    loop_start = float(match.group(1))
+    loop_end = float(match.group(2))
+    loop_iters = int(match.group(3))
+    if loop_end <= loop_start:
+        raise MeasurementError(
+            f"Ventana de lazo degenerada para {context}: start={loop_start}, end={loop_end}"
+        )
+    return loop_start, loop_end, loop_iters
+
+
+def interpolate_series(samples: Sequence[Tuple[float, float]], t: float) -> float:
+    """Interpola linealmente el valor de una serie temporizada en el instante t.
+
+    Args:
+        samples: Muestras (timestamp, valor) ordenadas por timestamp.
+        t: Instante en el que se quiere evaluar la serie.
+
+    Returns:
+        Valor interpolado; se satura al primer/ultimo valor fuera del rango muestreado.
+    """
+    if t <= samples[0][0]:
+        return samples[0][1]
+    if t >= samples[-1][0]:
+        return samples[-1][1]
+
+    for (t_a, v_a), (t_b, v_b) in zip(samples, samples[1:]):
+        if t_a <= t <= t_b:
+            if t_b == t_a:
+                return v_b
+            return v_a + (v_b - v_a) * ((t - t_a) / (t_b - t_a))
+    return samples[-1][1]
+
+
+def energy_from_power_samples(
+    samples: Sequence[Tuple[float, float]], t_start: float, t_end: float
+) -> Tuple[float, int]:
+    """Integra muestras de potencia (NVML) restringidas a una ventana temporal.
+
+    Args:
+        samples: Muestras (timestamp, potencia_w) ordenadas por timestamp.
+        t_start: Inicio de la ventana de integracion.
+        t_end: Fin de la ventana de integracion.
+
+    Returns:
+        Tupla (energia_j, muestras_crudas_dentro_de_la_ventana). Los bordes se
+        interpolan para no truncar ni extender la ventana.
+    """
     samples = sorted(samples, key=lambda item: item[0])
-    area = 0.0
-    for (t0, p0), (t1, p1) in zip(samples, samples[1:]):
-        dt = t1 - t0
-        if dt > 0:
-            area += (p0 + p1) * 0.5 * dt
+    interior = [s for s in samples if t_start < s[0] < t_end]
+    bounded = (
+        [(t_start, interpolate_series(samples, t_start))]
+        + interior
+        + [(t_end, interpolate_series(samples, t_end))]
+    )
 
-    duration = samples[-1][0] - samples[0][0]
-    if duration <= 0.0:
-        return samples[-1][1], 0.0
-    avg = area / duration
-    energy = area  # area is in W*s = Joules over the sampling window
-    return avg, energy
+    energy_j = 0.0
+    for (t_a, p_a), (t_b, p_b) in zip(bounded, bounded[1:]):
+        dt = t_b - t_a
+        if dt > 0.0:
+            energy_j += (p_a + p_b) * 0.5 * dt
+    return energy_j, len(interior)
 
 
-def monitor_power_cpu(energy_path, stop_event, power_queue):
-    # Monitor RAPL via sysfs: lee energy_uj al inicio y al final.
-    def read_energy_uj(path):
-        with open(path, "r") as f:
-            return int(f.read().strip())
+def energy_from_counter_samples(
+    samples: Sequence[Tuple[float, float]], t_start: float, t_end: float
+) -> Tuple[float, int]:
+    """Calcula la energia consumida en una ventana a partir de un contador acumulado (RAPL).
 
+    Args:
+        samples: Muestras (timestamp, energia_acumulada_j) ordenadas por timestamp.
+        t_start: Inicio de la ventana.
+        t_end: Fin de la ventana.
+
+    Returns:
+        Tupla (energia_j, muestras_crudas_dentro_de_la_ventana). El contador se
+        interpola en ambos bordes y se toma la diferencia.
+    """
+    samples = sorted(samples, key=lambda item: item[0])
+    interior = [s for s in samples if t_start < s[0] < t_end]
+    energy_j = interpolate_series(samples, t_end) - interpolate_series(samples, t_start)
+    return max(0.0, energy_j), len(interior)
+
+
+def monitor_energy_cpu(
+    rapl_paths: Sequence[str], stop_event: threading.Event, sample_queue: queue.Queue
+) -> None:
+    """Muestrea de forma continua los contadores RAPL acumulados de todos los sockets.
+
+    A diferencia de una lectura inicial/final, el muestreo continuo permite recortar
+    despues la energia a la ventana exacta del lazo medido.
+
+    Args:
+        rapl_paths: Rutas a los archivos energy_uj de cada dominio package.
+        stop_event: Evento que detiene el muestreo.
+        sample_queue: Cola donde se publica la tupla (muestras, vueltas_irrecuperables);
+            cada muestra es (timestamp, energia_acumulada_j).
+    """
+    max_ranges: List[Optional[int]] = []
+    for path in rapl_paths:
+        try:
+            with open(path.replace("energy_uj", "max_energy_range_uj"), "r") as f_max:
+                max_ranges.append(int(f_max.read().strip()))
+        except Exception:
+            max_ranges.append(None)
+            warn_rapl_range_missing_once(path)
+
+    last_raw: List[Optional[int]] = [None] * len(rapl_paths)
+    accumulated_uj: List[int] = [0] * len(rapl_paths)
+    samples: List[Tuple[float, float]] = []
+    # Instantes en los que el contador dio la vuelta sin que se pudiera reconstruir la
+    # energia perdida. El consumidor decide si invalidan la medicion segun caigan dentro
+    # o fuera de la ventana del lazo.
+    lost_wraps: List[float] = []
+
+    def take_sample() -> None:
+        timestamp = time.perf_counter()
+        total_uj = 0
+        for index, path in enumerate(rapl_paths):
+            try:
+                with open(path, "r") as f_energy:
+                    raw = int(f_energy.read().strip())
+            except Exception:
+                # Lectura puntual fallida: descartamos la muestra completa para no
+                # introducir un salto artificial en el contador acumulado.
+                return
+            previous = last_raw[index]
+            if previous is not None:
+                delta = raw - previous
+                if delta < 0:
+                    # Reinicio del contador. El hardware no lo senaliza de ninguna forma
+                    # (en un Xeon Silver 4314 el ciclo completo toma ~52 min bajo carga
+                    # mixta), asi que solo el muestreo continuo permite detectarlo.
+                    # Al muestrear cada RAPL_SAMPLE_INTERVAL_SEC
+                    # solo puede haber ocurrido una vuelta entre dos lecturas (darlas dos
+                    # veces en milisegundos exigiria una potencia irreal), asi que una sola
+                    # correccion basta. La acumulacion se hace ANTES de interpolar, de modo
+                    # que la serie entregada es monotona y el reinicio nunca aparece como
+                    # un salto dentro de la ventana.
+                    max_range = max_ranges[index]
+                    if max_range:
+                        delta = raw + max_range - previous
+                    else:
+                        # Sin el rango no hay forma de saber cuanta energia hubo entre
+                        # `previous` y la vuelta: se anota para invalidar la medicion en
+                        # lugar de reportar en silencio un valor subestimado.
+                        delta = 0
+                        lost_wraps.append(timestamp)
+                accumulated_uj[index] += delta
+            last_raw[index] = raw
+            total_uj += accumulated_uj[index]
+        samples.append((timestamp, total_uj / 1e6))
+
+    while True:
+        take_sample()
+        if stop_event.wait(RAPL_SAMPLE_INTERVAL_SEC):
+            break
+
+    # Muestra final posterior a la parada: cubre el borde derecho de la ventana.
+    take_sample()
+    sample_queue.put((samples, lost_wraps))
+
+
+def measure_idle_power_gpu(gpu_index: int, duration_sec: float) -> float:
+    """Mide la potencia en reposo de la GPU con NVML.
+
+    Args:
+        gpu_index: Indice del dispositivo NVML.
+        duration_sec: Duracion del muestreo en reposo.
+
+    Returns:
+        Potencia media en Watts; 0.0 si la medicion no fue posible.
+    """
     try:
-        t0 = time.perf_counter()
-        e0 = read_energy_uj(energy_path)
-    except Exception:
-        power_queue.put([])
-        return
+        handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
+        stop_event = threading.Event()
+        sample_queue: queue.Queue = queue.Queue(maxsize=1)
+        thread = threading.Thread(
+            target=monitor_power_gpu, args=(handle, stop_event, sample_queue), daemon=True
+        )
+        thread.start()
+        time.sleep(duration_sec)
+        stop_event.set()
+        thread.join()
+        samples = sample_queue.get() if not sample_queue.empty() else []
+    except Exception as ex:
+        print(f"[!] No se pudo medir la potencia idle de GPU: {ex}", file=sys.stderr)
+        return 0.0
 
-    # Espera a la senal de parada
-    stop_event.wait()
+    if len(samples) < 2:
+        return 0.0
+    energy_j, _ = energy_from_power_samples(samples, samples[0][0], samples[-1][0])
+    span = samples[-1][0] - samples[0][0]
+    return energy_j / span if span > 0.0 else 0.0
 
+
+def measure_idle_power_cpu(rapl_paths: Sequence[str], duration_sec: float) -> float:
+    """Mide la potencia en reposo de los sockets de CPU con RAPL.
+
+    Args:
+        rapl_paths: Rutas a los contadores energy_uj de cada package.
+        duration_sec: Duracion del muestreo en reposo.
+
+    Returns:
+        Potencia media en Watts; 0.0 si la medicion no fue posible.
+    """
+    if not rapl_paths:
+        return 0.0
     try:
-        t1 = time.perf_counter()
-        e1 = read_energy_uj(energy_path)
-    except Exception:
-        power_queue.put([])
-        return
+        stop_event = threading.Event()
+        sample_queue: queue.Queue = queue.Queue(maxsize=1)
+        thread = threading.Thread(
+            target=monitor_energy_cpu, args=(rapl_paths, stop_event, sample_queue), daemon=True
+        )
+        thread.start()
+        time.sleep(duration_sec)
+        stop_event.set()
+        thread.join()
+        payload = sample_queue.get() if not sample_queue.empty() else None
+        samples, lost_wraps = payload if payload else ([], [])
+        if lost_wraps:
+            print(
+                "[!] El contador RAPL dio la vuelta al medir el idle de CPU sin poder "
+                "reconstruir la energia; se omite la linea base.",
+                file=sys.stderr,
+            )
+            return 0.0
+    except Exception as ex:
+        print(f"[!] No se pudo medir la potencia idle de CPU: {ex}", file=sys.stderr)
+        return 0.0
 
-    # RAPL energy_uj esta en microjoules, convertimos a joules.
-    # Dividimos entre 1e6 (1 microjoule = 1e-6 joules)
-    samples = [(t0, e0 / 1e6), (t1, e1 / 1e6)]
-    power_queue.put(samples)
+    if len(samples) < 2:
+        return 0.0
+    span = samples[-1][0] - samples[0][0]
+    if span <= 0.0:
+        return 0.0
+    energy_j, _ = energy_from_counter_samples(samples, samples[0][0], samples[-1][0])
+    return energy_j / span
+
+
+def configure_idle_baselines(
+    devices: Sequence[str],
+    measure_sec: float,
+    cpu_override: Optional[float],
+    gpu_override: Optional[float],
+    gpu_index: int,
+) -> None:
+    """Fija las lineas base de potencia en reposo usadas para aislar la potencia activa.
+
+    Args:
+        devices: Dispositivos incluidos en el barrido.
+        measure_sec: Segundos de muestreo en reposo (0 desactiva la medicion).
+        cpu_override: Potencia idle de CPU fijada por CLI, o None para medirla.
+        gpu_override: Potencia idle de GPU fijada por CLI, o None para medirla.
+        gpu_index: Indice del dispositivo NVML.
+    """
+    global IDLE_POWER_CPU, IDLE_POWER_GPU
+
+    if cpu_override is not None:
+        IDLE_POWER_CPU = cpu_override
+    elif "cpu" in devices and measure_sec > 0.0:
+        print(f"Midiendo potencia idle de CPU durante {measure_sec:.1f}s...")
+        IDLE_POWER_CPU = measure_idle_power_cpu(find_rapl_energy_paths(), measure_sec)
+
+    if gpu_override is not None:
+        IDLE_POWER_GPU = gpu_override
+    elif "gpu" in devices and measure_sec > 0.0:
+        print(f"Midiendo potencia idle de GPU durante {measure_sec:.1f}s...")
+        IDLE_POWER_GPU = measure_idle_power_gpu(gpu_index, measure_sec)
+
+    print(
+        f"Linea base idle -> CPU: {IDLE_POWER_CPU:.3f} W | GPU: {IDLE_POWER_GPU:.3f} W"
+    )
+
+
+def run_monitored_execution(
+    cmd_pwr: Sequence[str],
+    device: str,
+    gpu_index: int,
+    timeout: float,
+    sub_env: Dict[str, str],
+    time_sec: float,
+    context: str,
+) -> Dict[str, float]:
+    """Ejecuta el binario con telemetria activa y acota las metricas al lazo medido.
+
+    Corresponde a la tercera fase del protocolo de aislamiento (warm-up -> medicion sin
+    energia -> medicion con energia). El muestreo cubre todo el proceso, pero la energia
+    se integra unicamente entre las marcas LOOP_WINDOW que publica el binario, de modo
+    que el setup (plan, reservas, generacion de datos) y el cierre no contaminan la
+    potencia ni la energia atribuidas al kernel.
+
+    Args:
+        cmd_pwr: Comando completo del binario con el numero de iteraciones de la fase
+            de potencia ya inyectado.
+        device: "cpu" o "gpu".
+        gpu_index: Indice del dispositivo NVML.
+        timeout: Timeout en segundos para el subproceso.
+        sub_env: Entorno del subproceso (incluye BENCH_SEED).
+        time_sec: Tiempo por iteracion medido en la fase de aislamiento.
+        context: Descripcion del caso para los mensajes de error.
+
+    Returns:
+        Diccionario con Avg_Power_W, Energy_J, EDP y los campos de auditoria de la
+        ventana de medicion.
+
+    Raises:
+        RuntimeError: Si el binario termina con codigo distinto de cero.
+        MeasurementError: Si no hay telemetria, si esta no cubre la ventana, si es
+            demasiado escasa, si el contador dio una vuelta irreconstruible dentro de la
+            ventana, o si la potencia medida cae por debajo de la linea base de reposo.
+    """
+    sample_queue: queue.Queue = queue.Queue(maxsize=1)
+    stop_event = threading.Event()
+    monitor_thread: Optional[threading.Thread] = None
+    rapl_paths: List[str] = []
+
+    if device == "gpu":
+        idle_power_w = IDLE_POWER_GPU
+        handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
+        monitor_thread = threading.Thread(
+            target=monitor_power_gpu, args=(handle, stop_event, sample_queue), daemon=True
+        )
+        monitor_thread.start()
+    else:
+        idle_power_w = IDLE_POWER_CPU
+        rapl_paths = find_rapl_energy_paths()
+        if rapl_paths:
+            monitor_thread = threading.Thread(
+                target=monitor_energy_cpu,
+                args=(rapl_paths, stop_event, sample_queue),
+                daemon=True,
+            )
+            monitor_thread.start()
+        else:
+            warn_rapl_missing_once()
+
+    start_wall = time.perf_counter()
+    try:
+        proc_pwr = subprocess.run(
+            list(cmd_pwr),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            env=sub_env,
+        )
+    finally:
+        stop_event.set()
+        if monitor_thread is not None:
+            monitor_thread.join()
+    end_wall = time.perf_counter()
+
+    if proc_pwr.returncode != 0:
+        raise RuntimeError(
+            f"Fallo en la ejecucion de monitoreo para {context}.\n"
+            f"STDOUT:\n{proc_pwr.stdout}\nSTDERR:\n{proc_pwr.stderr}"
+        )
+
+    loop_start, loop_end, loop_iters = parse_loop_window(proc_pwr.stdout, context)
+    window_sec = loop_end - loop_start
+
+    payload = sample_queue.get() if not sample_queue.empty() else None
+    if device == "gpu":
+        samples = payload or []
+        lost_wraps: List[float] = []
+    else:
+        samples, lost_wraps = payload if payload else ([], [])
+
+    # Una vuelta del contador que no se pudo reconstruir solo corrompe la medicion si
+    # ocurrio DENTRO de la ventana: la energia del lazo es una diferencia de la serie
+    # acumulada, asi que un salto anterior o posterior se cancela.
+    wraps_in_window = [t for t in lost_wraps if loop_start <= t <= loop_end]
+    if wraps_in_window:
+        raise MeasurementError(
+            f"El contador RAPL dio la vuelta durante la ventana de {context} y no se pudo "
+            "reconstruir la energia perdida (falta max_energy_range_uj)."
+        )
+
+    metrics: Dict[str, float] = {
+        "Loop_Window_sec": window_sec,
+        "Iters_K": loop_iters,
+        "Idle_Power_W": idle_power_w,
+        "Wall_Elapsed_sec": end_wall - start_wall,
+    }
+
+    if not samples:
+        # Sin telemetria no hay medicion energetica. Escribir ceros seria peor que no
+        # escribir nada: aguas abajo un EDP=0 es el valor optimo, asi que el agente
+        # aprenderia a preferir precisamente las mediciones que fallaron.
+        raise MeasurementError(
+            f"No se obtuvo telemetria para {context} "
+            f"({'NVML no devolvio muestras' if device == 'gpu' else 'RAPL no legible'})."
+        )
+
+    if samples[0][0] > loop_start or samples[-1][0] < loop_end:
+        raise MeasurementError(
+            f"Las muestras no cubren la ventana del lazo para {context}: "
+            f"muestreo [{samples[0][0]:.6f}, {samples[-1][0]:.6f}] vs "
+            f"lazo [{loop_start:.6f}, {loop_end:.6f}]."
+        )
+
+    if device == "gpu":
+        energy_window_j, samples_inside = energy_from_power_samples(samples, loop_start, loop_end)
+    else:
+        energy_window_j, samples_inside = energy_from_counter_samples(samples, loop_start, loop_end)
+
+    # Confiabilidad: el protocolo exige medir el tiempo sin telemetria y la potencia en una
+    # segunda corrida, asi que ambos tiempos por iteracion deben coincidir. Una divergencia
+    # grande indica que el dispositivo no estaba en el mismo estado en las dos fases.
+    loop_time_per_iter = window_sec / loop_iters if loop_iters > 0 else 0.0
+    if loop_time_per_iter > 0.0:
+        divergence = abs(loop_time_per_iter - time_sec) / time_sec
+        if divergence > LOOP_TIME_DIVERGENCE_WARN:
+            print(
+                f"[!] Aviso {context}: el tiempo por iteracion difiere {divergence * 100:.1f}% "
+                f"entre la fase de aislamiento ({time_sec:.9f}s) y la de potencia "
+                f"({loop_time_per_iter:.9f}s).",
+                file=sys.stderr,
+            )
+
+    if samples_inside < MIN_SAMPLES_IN_WINDOW:
+        raise MeasurementError(
+            f"Telemetria insuficiente para {context}: {samples_inside} muestras dentro de "
+            f"una ventana de {window_sec * 1e3:.1f} ms. Aumenta --power-window-sec."
+        )
+
+    # Aislamiento de la potencia activa: descontamos el consumo en reposo del mismo
+    # intervalo para que Avg_Power_W refleje solo el costo atribuible al computo.
+    window_power_w = energy_window_j / window_sec
+    if idle_power_w > 0.0 and window_power_w < idle_power_w * IDLE_BASELINE_TOLERANCE:
+        # Un lazo activo no puede consumir menos que el reposo: o la linea base se midio
+        # con la maquina ocupada, o la telemetria no corresponde a esta ejecucion. Sin
+        # este corte la resta se saturaria en cero y la fila entraria al CSV como si el
+        # kernel fuese gratis.
+        raise MeasurementError(
+            f"Potencia bajo el reposo en {context}: {window_power_w:.2f} W medidos frente "
+            f"a una linea base de {idle_power_w:.2f} W. Revisa la medicion de idle "
+            "(--idle-power-cpu / --idle-power-gpu) o el estado del nodo."
+        )
+
+    energy_active_j = max(0.0, energy_window_j - idle_power_w * window_sec)
+    avg_power_w = energy_active_j / window_sec
+
+    # Energia de UNA ejecucion, coherente por construccion con el Time_sec reportado:
+    # Energy_J = Avg_Power_W * Time_sec y EDP = Energy_J * Time_sec.
+    energy_j = avg_power_w * time_sec
+
+    metrics.update(
+        {
+            "Avg_Power_W": avg_power_w,
+            "Energy_J": energy_j,
+            "EDP": energy_j * time_sec,
+            "Power_Samples": samples_inside,
+        }
+    )
+    return metrics
 
 
 def find_rapl_energy_paths():
@@ -890,133 +1406,32 @@ def run_single_case(
         time_sec = float(match.group(1))
 
         # 3. Power Monitoring Execution (Segunda ejecucion identica con monitor activo)
-        K = min(20000, max(1, round(0.15 / time_sec)))
-        cmd_pwr = list(cmd)
-        try:
-            iters_idx = cmd_pwr.index("--iters")
-            cmd_pwr[iters_idx + 1] = str(K)
-        except ValueError:
-            cmd_pwr.extend(["--iters", str(K)])
-
-        power_queue = queue.Queue(maxsize=1)
-        stop_event = threading.Event()
-        monitor_thread = None
-        
-        rapl_paths = []
-        e0_list = []
-        t0 = 0.0
-
-        if device == "gpu":
-            handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
-            monitor_thread = threading.Thread(
-                target=monitor_power_gpu,
-                args=(handle, stop_event, power_queue),
-                daemon=True,
-            )
-            if monitor_thread is not None:
-                monitor_thread.start()
-        else:
-            rapl_paths = find_rapl_energy_paths()
-            if rapl_paths:
-                try:
-                    t0 = time.perf_counter()
-                    for p in rapl_paths:
-                        with open(p, "r") as f:
-                            e0_list.append(int(f.read().strip()))
-                except Exception as ex:
-                    print(f"[!] Error al leer RAPL inicial: {ex}", file=sys.stderr)
-                    rapl_paths = []
-            else:
-                warn_rapl_missing_once()
-
-        start_wall = time.perf_counter()
-        try:
-            proc_pwr = subprocess.run(
-                cmd_pwr,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-                env=sub_env,
-            )
-        finally:
-            stop_event.set()
-            if monitor_thread is not None:
-                monitor_thread.join()
-
-        end_wall = time.perf_counter()
-        samples = []
-
-        if proc_pwr.returncode != 0:
-            raise RuntimeError(
-                "Fallo en binario para ejecucion de monitoreo "
-                f"M={m}, N={n}, K={k}, P={precision}, OpA={op_a}, OpB={op_b}.\n"
-                f"STDOUT:\n{proc_pwr.stdout}\nSTDERR:\n{proc_pwr.stderr}"
-            )
         if time_sec <= 0.0:
             time_sec = 1e-9
 
-        avg_power_w = 0.0
-        energy_j = 0.0
-        wall_time = end_wall - start_wall
-        power_window_sec = wall_time
+        # El lazo se dimensiona para durar POWER_WINDOW_TARGET_SEC: una ventana corta
+        # deja demasiado pocas muestras de NVML/RAPL para integrar la energia con rigor.
+        power_iters = min(20000, max(1, round(POWER_WINDOW_TARGET_SEC / time_sec)))
+        cmd_pwr = list(cmd)
+        try:
+            iters_idx = cmd_pwr.index("--iters")
+            cmd_pwr[iters_idx + 1] = str(power_iters)
+        except ValueError:
+            cmd_pwr.extend(["--iters", str(power_iters)])
 
-        if device == "gpu":
-            samples = power_queue.get() if not power_queue.empty() else []
-            avg_power_w, energy_total_j = average_and_energy_from_samples(samples)
-            energy_j = energy_total_j / K
-            if samples:
-                power_window_sec = samples[-1][0] - samples[0][0]
-        else:
-            if rapl_paths:
-                try:
-                    t1 = time.perf_counter()
-                    energy_total_j = 0.0
-                    for i, p in enumerate(rapl_paths):
-                        with open(p, "r") as f:
-                            val = int(f.read().strip())
-                        if val >= e0_list[i]:
-                            diff = (val - e0_list[i]) / 1e6
-                        else:
-                            # Rollover occurred
-                            max_range_path = p.replace("energy_uj", "max_energy_range_uj")
-                            try:
-                                with open(max_range_path, "r") as f_max:
-                                    max_range = int(f_max.read().strip())
-                                diff = ((val + max_range) - e0_list[i]) / 1e6
-                            except Exception:
-                                diff = max(0.0, (val - e0_list[i]) / 1e6)
-                        energy_total_j += diff
-
-                    power_window_sec = t1 - t0
-                    if power_window_sec <= 0.0:
-                        power_window_sec = wall_time
-                    
-                    # Deduce total idle energy consumption during the process window
-                    energy_idle = IDLE_POWER_CPU * power_window_sec
-                    energy_active = max(0.0, energy_total_j - energy_idle)
-                    
-                    # Calculate active power over the active computation loop (excluding startup/IO)
-                    t_active = K * time_sec
-                    avg_power_w = energy_active / t_active if t_active > 0.0 else 0.0
-                    energy_j = energy_active / K if K > 0 else 0.0
-                except Exception as ex:
-                    print(f"[!] Error al leer RAPL final: {ex}", file=sys.stderr)
-                    avg_power_w = 0.0
-                    energy_j = 0.0
-            else:
-                avg_power_w = 0.0
-                energy_j = 0.0
+        context = (
+            f"GEMM M={m}, N={n}, K={k}, P={precision}, OpA={op_a}, OpB={op_b} [{device}]"
+        )
+        telemetry = run_monitored_execution(
+            cmd_pwr, device, gpu_index, timeout, sub_env, time_sec, context
+        )
 
         if precision in {"C", "Z"}:
             ops = 8.0 * m * n * k
         else:
             ops = 2.0 * m * n * k
 
-        gflops = (ops / time_sec) / 1e9
-        edp = energy_j * time_sec
-
-        return {
+        result = {
             "M": m,
             "N": n,
             "K": k,
@@ -1024,13 +1439,10 @@ def run_single_case(
             "OpA": op_a,
             "OpB": op_b,
             "Time_sec": time_sec,
-            "GFLOPS": gflops,
-            "Avg_Power_W": avg_power_w,
-            "Energy_J": energy_j,
-            "EDP": edp,
-            "Power_Samples": len(samples) if device == "gpu" else (2 * len(rapl_paths) if rapl_paths else 0),
-            "Wall_Elapsed_sec": end_wall - start_wall,
+            "GFLOPS": (ops / time_sec) / 1e9,
         }
+        result.update(telemetry)
+        return result
     finally:
         # Solo eliminar el archivo si es temporal (no proviene del DataBankManager).
         if matrix_file and not _gemm_file_is_persistent and os.path.exists(matrix_file):
@@ -1132,125 +1544,27 @@ def run_single_case_fft(
         time_sec = 1e-9
 
     # 3. Power Monitoring Execution (Segunda ejecucion con monitor activo)
-    K = min(20000, max(1, round(0.15 / time_sec)))
+    # El lazo se dimensiona para durar POWER_WINDOW_TARGET_SEC: una ventana corta deja
+    # demasiado pocas muestras de NVML/RAPL para integrar la energia con rigor.
+    power_iters = min(20000, max(1, round(POWER_WINDOW_TARGET_SEC / time_sec)))
     cmd_pwr = list(cmd)
     if len(cmd_pwr) > 10:
-        cmd_pwr[10] = str(K)
+        cmd_pwr[10] = str(power_iters)
     else:
         raise ValueError(f"Comando FFT mal formado para agregar iteraciones: {cmd_pwr}")
 
-    power_queue = queue.Queue(maxsize=1)
-    stop_event = threading.Event()
-    monitor_thread = None
-    
-    rapl_paths = []
-    e0_list = []
-    t0 = 0.0
-
-    if device == "gpu":
-        handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
-        monitor_thread = threading.Thread(
-            target=monitor_power_gpu,
-            args=(handle, stop_event, power_queue),
-            daemon=True,
-        )
-        if monitor_thread is not None:
-            monitor_thread.start()
-    else:
-        rapl_paths = find_rapl_energy_paths()
-        if rapl_paths:
-            try:
-                t0 = time.perf_counter()
-                for p in rapl_paths:
-                    with open(p, "r") as f:
-                        e0_list.append(int(f.read().strip()))
-            except Exception as ex:
-                print(f"[!] Error al leer RAPL inicial en FFT: {ex}", file=sys.stderr)
-                rapl_paths = []
-        else:
-            warn_rapl_missing_once()
-
-    start_wall = time.perf_counter()
-    try:
-        proc_pwr = subprocess.run(
-            cmd_pwr,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-            env=sub_env,
-        )
-    finally:
-        stop_event.set()
-        if monitor_thread is not None:
-            monitor_thread.join()
-
-    end_wall = time.perf_counter()
-    samples = []
-    
-    if proc_pwr.returncode != 0:
-        raise RuntimeError("Fallo en ejecucion de monitoreo de FFT.")
-    if time_sec <= 0.0:
-        time_sec = 1e-9
-
-    avg_power_w = 0.0
-    energy_j = 0.0
-    wall_time = end_wall - start_wall
-    power_window_sec = wall_time
-
-    if device == "gpu":
-        samples = power_queue.get() if not power_queue.empty() else []
-        avg_power_w, energy_total_j = average_and_energy_from_samples(samples)
-        energy_j = energy_total_j / K
-        if samples:
-            power_window_sec = samples[-1][0] - samples[0][0]
-    else:
-        if rapl_paths:
-            try:
-                t1 = time.perf_counter()
-                energy_total_j = 0.0
-                for i, p in enumerate(rapl_paths):
-                    with open(p, "r") as f:
-                        val = int(f.read().strip())
-                    if val >= e0_list[i]:
-                        diff = (val - e0_list[i]) / 1e6
-                    else:
-                        # Rollover occurred
-                        max_range_path = p.replace("energy_uj", "max_energy_range_uj")
-                        try:
-                            with open(max_range_path, "r") as f_max:
-                                max_range = int(f_max.read().strip())
-                            diff = ((val + max_range) - e0_list[i]) / 1e6
-                        except Exception:
-                            diff = max(0.0, (val - e0_list[i]) / 1e6)
-                    energy_total_j += diff
-
-                power_window_sec = t1 - t0
-                if power_window_sec <= 0.0:
-                    power_window_sec = wall_time
-                
-                # Deduce total idle energy consumption during the process window
-                energy_idle = IDLE_POWER_CPU * power_window_sec
-                energy_active = max(0.0, energy_total_j - energy_idle)
-                
-                # Calculate active power over the active computation loop (excluding startup/IO)
-                t_active = K * time_sec
-                avg_power_w = energy_active / t_active if t_active > 0.0 else 0.0
-                energy_j = energy_active / K if K > 0 else 0.0
-            except Exception as ex:
-                print(f"[!] Error al leer RAPL final en FFT: {ex}", file=sys.stderr)
-                avg_power_w = 0.0
-                energy_j = 0.0
-        else:
-            avg_power_w = 0.0
-            energy_j = 0.0
+    context = (
+        f"FFT Nx={nx}, Ny={ny}, Nz={nz}, Batch={batch}, P={precision}, D={domain}, "
+        f"Dir={direction}, L={layout} [{device}]"
+    )
+    telemetry = run_monitored_execution(
+        cmd_pwr, device, gpu_index, timeout, sub_env, time_sec, context
+    )
 
     dims = fft_dims(nx, ny, nz)
     ops = fft_flops(dims, domain) * batch
-    gflops = (ops / time_sec) / 1e9
-    edp = energy_j * time_sec
 
-    return {
+    result = {
         "Device": device,
         "Nx": nx,
         "Ny": ny,
@@ -1261,12 +1575,10 @@ def run_single_case_fft(
         "Direction": direction,
         "Layout": layout,
         "Time_sec": time_sec,
-        "GFLOPS": gflops,
-        "Avg_Power_W": avg_power_w,
-        "Energy_J": energy_j,
-        "EDP": edp,
-        "Wall_Elapsed_sec": end_wall - start_wall,
+        "GFLOPS": (ops / time_sec) / 1e9,
     }
+    result.update(telemetry)
+    return result
 
 
 def run_fft_warmup(
@@ -1366,6 +1678,14 @@ def run_gemm(args):
     if "gpu" in devices:
         init_nvml_if_needed(devices, args.gpu_index)
 
+    configure_idle_baselines(
+        devices,
+        args.idle_measure_sec,
+        args.idle_power_cpu,
+        args.idle_power_gpu,
+        args.gpu_index,
+    )
+
     try:
         fieldnames = [
             "Device",
@@ -1384,6 +1704,13 @@ def run_gemm(args):
             "Avg_Power_W",
             "Energy_J",
             "EDP",
+            # Metadata de la ventana de medicion: permite auditar a posteriori que la
+            # telemetria se integro sobre el lazo y no sobre el proceso completo.
+            "Loop_Window_sec",
+            "Iters_K",
+            "Power_Samples",
+            "Idle_Power_W",
+            "Wall_Elapsed_sec",
         ])
 
         if args.full_dim_sweep:
@@ -1405,33 +1732,14 @@ def run_gemm(args):
                         for rep in range(args.repetitions):
                             done += 1
                             
-                            # 1. Warm-ups (Python-controlled flat loop)
-                            # Only execute warmups on the first repetition if not explicitly requested on CLI
-                            if args.is_warmup:
-                                # If called via CLI with --is-warmup, only execute 1 warmup call and proceed/skip measurement
-                                run_single_case(
-                                    binary,
-                                    device,
-                                    args.gpu_index,
-                                    m,
-                                    n,
-                                    k,
-                                    precision,
-                                    op_a,
-                                    op_b,
-                                    args.timeout,
-                                    True, # is_warmup
-                                    args.seed if args.seed else None,
-                                    use_databank=args.use_databank,
-                                    bank_profile=args.gemm_profile,
-                                    databank_dir=args.databank_dir,
-                                    databank_max_n=args.databank_max_n,
-                                )
-                                print(f"[{done}/{total}] {device.upper()} M={m} N={n} K={k} P={precision} OpA={op_a} OpB={op_b} Rep={rep} [WARMUP ONLY]")
-                                continue
-                            else:
-                                warmup_count = args.gemm_warmup if rep == 0 else 0
-                                for _ in range(warmup_count):
+                            # Confiabilidad del barrido: una medicion fallida (telemetria
+                            # incompleta, timeout o binario sin marcas) se omite sin abortar
+                            # el resto del sweep.
+                            try:
+                                # 1. Warm-ups (Python-controlled flat loop)
+                                # Only execute warmups on the first repetition if not explicitly requested on CLI
+                                if args.is_warmup:
+                                    # If called via CLI with --is-warmup, only execute 1 warmup call and proceed/skip measurement
                                     run_single_case(
                                         binary,
                                         device,
@@ -1450,41 +1758,71 @@ def run_gemm(args):
                                         databank_dir=args.databank_dir,
                                         databank_max_n=args.databank_max_n,
                                     )
+                                    print(f"[{done}/{total}] {device.upper()} M={m} N={n} K={k} P={precision} OpA={op_a} OpB={op_b} Rep={rep} [WARMUP ONLY]")
+                                    continue
+                                else:
+                                    warmup_count = args.gemm_warmup if rep == 0 else 0
+                                    for _ in range(warmup_count):
+                                        run_single_case(
+                                            binary,
+                                            device,
+                                            args.gpu_index,
+                                            m,
+                                            n,
+                                            k,
+                                            precision,
+                                            op_a,
+                                            op_b,
+                                            args.timeout,
+                                            True, # is_warmup
+                                            args.seed if args.seed else None,
+                                            use_databank=args.use_databank,
+                                            bank_profile=args.gemm_profile,
+                                            databank_dir=args.databank_dir,
+                                            databank_max_n=args.databank_max_n,
+                                        )
 
-                                # 2. Measurement (is_warmup = False)
-                                result = run_single_case(
-                                    binary,
-                                    device,
-                                    args.gpu_index,
-                                    m,
-                                    n,
-                                    k,
-                                    precision,
-                                    op_a,
-                                    op_b,
-                                    args.timeout,
-                                    False, # is_warmup
-                                    args.seed if args.seed else None,
-                                    use_databank=args.use_databank,
-                                    bank_profile=args.gemm_profile,
-                                    databank_dir=args.databank_dir,
-                                    databank_max_n=args.databank_max_n,
+                                    # 2. Measurement (is_warmup = False)
+                                    result = run_single_case(
+                                        binary,
+                                        device,
+                                        args.gpu_index,
+                                        m,
+                                        n,
+                                        k,
+                                        precision,
+                                        op_a,
+                                        op_b,
+                                        args.timeout,
+                                        False, # is_warmup
+                                        args.seed if args.seed else None,
+                                        use_databank=args.use_databank,
+                                        bank_profile=args.gemm_profile,
+                                        databank_dir=args.databank_dir,
+                                        databank_max_n=args.databank_max_n,
+                                    )
+
+                                # Include Device and Iteration in the written row
+                                row = {key: result.get(key, 0.0) for key in fieldnames if key not in ["Device", "Iteration"]}
+                                row["Device"] = device
+                                if args.repetitions > 1:
+                                    row["Iteration"] = rep
+                                writer.writerow(row)
+                                f.flush()
+
+                                print(
+                                    f"[{done}/{total}] {device.upper()} M={m} N={n} K={k} P={precision} OpA={op_a} OpB={op_b} "
+                                    f"Rep={rep} Time={result['Time_sec']:.6f}s GFLOPS={result['GFLOPS']:.3f} "
+                                    f"Pavg={result['Avg_Power_W']:.3f}W Energy={result['Energy_J']:.6f}J "
+                                    f"EDP={result['EDP']:.9f}"
                                 )
-
-                            # Include Device and Iteration in the written row
-                            row = {key: result.get(key, 0.0) for key in fieldnames if key not in ["Device", "Iteration"]}
-                            row["Device"] = device
-                            if args.repetitions > 1:
-                                row["Iteration"] = rep
-                            writer.writerow(row)
-                            f.flush()
-
-                            print(
-                                f"[{done}/{total}] {device.upper()} M={m} N={n} K={k} P={precision} OpA={op_a} OpB={op_b} "
-                                f"Rep={rep} Time={result['Time_sec']:.6f}s GFLOPS={result['GFLOPS']:.3f} "
-                                f"Pavg={result['Avg_Power_W']:.3f}W Energy={result['Energy_J']:.6f}J "
-                                f"EDP={result['EDP']:.9f}"
-                            )
+                            except (MeasurementError, RuntimeError, ValueError, OSError,
+                                    subprocess.SubprocessError) as ex:
+                                print(
+                                    f"[!] Medicion omitida [{done}/{total}] {device.upper()} rep={rep}: {ex}",
+                                    file=sys.stderr,
+                                )
+                                continue
 
         print(f"\nResultados guardados en: {output_path}")
     finally:
@@ -1535,6 +1873,14 @@ def run_fft(args):
     output_path = args.output or "fft_benchmark_results.csv"
     init_nvml_if_needed(devices, args.gpu_index)
 
+    configure_idle_baselines(
+        devices,
+        args.idle_measure_sec,
+        args.idle_power_cpu,
+        args.idle_power_gpu,
+        args.gpu_index,
+    )
+
     try:
         fieldnames = [
             "Device",
@@ -1555,6 +1901,13 @@ def run_fft(args):
             "Avg_Power_W",
             "Energy_J",
             "EDP",
+            # Metadata de la ventana de medicion: permite auditar a posteriori que la
+            # telemetria se integro sobre el lazo y no sobre el proceso completo.
+            "Loop_Window_sec",
+            "Iters_K",
+            "Power_Samples",
+            "Idle_Power_W",
+            "Wall_Elapsed_sec",
         ])
 
         cases = []
@@ -1601,33 +1954,14 @@ def run_fft(args):
                         for rep in range(args.repetitions):
                             done += 1
                             
-                            # 1. Warm-ups (Python-controlled flat loop)
-                            # Only execute warmups on the first repetition if not explicitly requested on CLI
-                            if args.is_warmup:
-                                # If called via CLI with --is-warmup, only execute 1 warmup call and proceed/skip measurement
-                                run_single_case_fft(
-                                    binary,
-                                    device,
-                                    args.gpu_index,
-                                    nx,
-                                    ny,
-                                    nz,
-                                    batch,
-                                    precision,
-                                    domain,
-                                    direction,
-                                    layout,
-                                    args.fft_plan,
-                                    True, # is_warmup
-                                    args.timeout,
-                                    matrix_file,
-                                    seed=args.seed,
-                                )
-                                print(f"[{done}/{total}] {device.upper()} Nx={nx} Ny={ny} Nz={nz} Batch={batch} P={precision} D={domain} Dir={direction} L={layout} Rep={rep} [WARMUP ONLY]")
-                                continue
-                            else:
-                                warmup_count = args.fft_warmup if rep == 0 else 0
-                                for _ in range(warmup_count):
+                            # Confiabilidad del barrido: una medicion fallida (telemetria
+                            # incompleta, timeout o binario sin marcas) se omite sin abortar
+                            # el resto del sweep.
+                            try:
+                                # 1. Warm-ups (Python-controlled flat loop)
+                                # Only execute warmups on the first repetition if not explicitly requested on CLI
+                                if args.is_warmup:
+                                    # If called via CLI with --is-warmup, only execute 1 warmup call and proceed/skip measurement
                                     run_single_case_fft(
                                         binary,
                                         device,
@@ -1646,41 +1980,71 @@ def run_fft(args):
                                         matrix_file,
                                         seed=args.seed,
                                     )
+                                    print(f"[{done}/{total}] {device.upper()} Nx={nx} Ny={ny} Nz={nz} Batch={batch} P={precision} D={domain} Dir={direction} L={layout} Rep={rep} [WARMUP ONLY]")
+                                    continue
+                                else:
+                                    warmup_count = args.fft_warmup if rep == 0 else 0
+                                    for _ in range(warmup_count):
+                                        run_single_case_fft(
+                                            binary,
+                                            device,
+                                            args.gpu_index,
+                                            nx,
+                                            ny,
+                                            nz,
+                                            batch,
+                                            precision,
+                                            domain,
+                                            direction,
+                                            layout,
+                                            args.fft_plan,
+                                            True, # is_warmup
+                                            args.timeout,
+                                            matrix_file,
+                                            seed=args.seed,
+                                        )
 
-                                # 2. Measurement (is_warmup = False)
-                                result = run_single_case_fft(
-                                    binary,
-                                    device,
-                                    args.gpu_index,
-                                    nx,
-                                    ny,
-                                    nz,
-                                    batch,
-                                    precision,
-                                    domain,
-                                    direction,
-                                    layout,
-                                    args.fft_plan,
-                                    False, # is_warmup
-                                    args.timeout,
-                                    matrix_file,
-                                    seed=args.seed,
+                                    # 2. Measurement (is_warmup = False)
+                                    result = run_single_case_fft(
+                                        binary,
+                                        device,
+                                        args.gpu_index,
+                                        nx,
+                                        ny,
+                                        nz,
+                                        batch,
+                                        precision,
+                                        domain,
+                                        direction,
+                                        layout,
+                                        args.fft_plan,
+                                        False, # is_warmup
+                                        args.timeout,
+                                        matrix_file,
+                                        seed=args.seed,
+                                    )
+
+                                row = {key: result.get(key, 0.0) for key in fieldnames if key not in ["Device", "Iteration"]}
+                                row["Device"] = device
+                                if args.repetitions > 1:
+                                    row["Iteration"] = rep
+                                writer.writerow(row)
+                                f.flush()
+
+                                print(
+                                    f"[{done}/{total}] {device.upper()} Nx={nx} Ny={ny} Nz={nz} Batch={batch} "
+                                    f"P={precision} D={domain} Dir={direction} L={layout} Rep={rep} "
+                                    f"Time={result['Time_sec']:.6f}s GFLOPS={result['GFLOPS']:.3f} "
+                                    f"Pavg={result['Avg_Power_W']:.3f}W Energy={result['Energy_J']:.6f}J "
+                                    f"EDP={result['EDP']:.9f}"
                                 )
-
-                            row = {key: result.get(key, 0.0) for key in fieldnames if key not in ["Device", "Iteration"]}
-                            row["Device"] = device
-                            if args.repetitions > 1:
-                                row["Iteration"] = rep
-                            writer.writerow(row)
-                            f.flush()
-
-                            print(
-                                f"[{done}/{total}] {device.upper()} Nx={nx} Ny={ny} Nz={nz} Batch={batch} "
-                                f"P={precision} D={domain} Dir={direction} L={layout} Rep={rep} "
-                                f"Time={result['Time_sec']:.6f}s GFLOPS={result['GFLOPS']:.3f} "
-                                f"Pavg={result['Avg_Power_W']:.3f}W Energy={result['Energy_J']:.6f}J "
-                                f"EDP={result['EDP']:.9f}"
-                            )
+                            except (MeasurementError, RuntimeError, ValueError, OSError,
+                                    subprocess.SubprocessError) as ex:
+                                print(
+                                    f"[!] Medicion omitida [{done}/{total}] {device.upper()} rep={rep}: {ex}",
+                                    file=sys.stderr,
+                                )
+                                continue
 
                     finally:
                         # Solo eliminar si es temporal (no del DataBankManager).
@@ -1694,7 +2058,7 @@ def run_fft(args):
 
 
 def main():
-    global IDLE_POWER_CPU
+    global POWER_WINDOW_TARGET_SEC
     parser = argparse.ArgumentParser(
         description="Orquestador de benchmarking GEMM/FFT con monitoreo de potencia"
     )
@@ -1858,8 +2222,29 @@ def main():
     parser.add_argument(
         "--idle-power-cpu",
         type=float,
-        default=IDLE_POWER_CPU,
-        help="Potencia de CPU en reposo (idle) en Watts.",
+        default=None,
+        help="Potencia de CPU en reposo (W). Si se omite, se mide al inicio del barrido.",
+    )
+    parser.add_argument(
+        "--idle-power-gpu",
+        type=float,
+        default=None,
+        help="Potencia de GPU en reposo (W). Si se omite, se mide al inicio del barrido.",
+    )
+    parser.add_argument(
+        "--idle-measure-sec",
+        type=float,
+        default=3.0,
+        help="Segundos de muestreo para medir la potencia en reposo (0 desactiva la medicion)",
+    )
+    parser.add_argument(
+        "--power-window-sec",
+        type=float,
+        default=POWER_WINDOW_TARGET_SEC,
+        help=(
+            "Duracion objetivo del lazo bajo monitoreo energetico. Ventanas mas largas "
+            "dan mas muestras de RAPL/NVML por medicion, a costa de tiempo de barrido."
+        ),
     )
     parser.add_argument(
         "--gemm-warmup",
@@ -1949,7 +2334,10 @@ def main():
     )
     args = parser.parse_args()
 
-    IDLE_POWER_CPU = args.idle_power_cpu
+    if args.power_window_sec <= 0.0:
+        raise ValueError("--power-window-sec debe ser positivo")
+    POWER_WINDOW_TARGET_SEC = args.power_window_sec
+    # Las lineas base de reposo se fijan en configure_idle_baselines(), ya con NVML activo.
 
     # Compatibilidad: --binary sobreescribe --gemm-binary-gpu
     if args.binary is not None:

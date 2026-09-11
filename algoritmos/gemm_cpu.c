@@ -92,6 +92,34 @@ static double monotonic_time_sec(void) {
 	return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
+/*
+ * Ventana de medicion energetica.
+ *
+ * El orquestador muestrea RAPL/NVML mientras el proceso esta vivo, pero solo el lazo
+ * cronometrado representa la carga que se quiere caracterizar: la creacion del plan,
+ * las reservas de memoria, la generacion determinista de datos y el cierre del proceso
+ * quedan fuera de esa carga. Publicamos los instantes CLOCK_MONOTONIC que delimitan el
+ * lazo para que el orquestador recorte las muestras a esa region; sin este recorte la
+ * energia del setup se atribuia al kernel e inflaba la potencia y la energia por
+ * iteracion (ver protocolo de aislamiento en CLAUDE.md seccion 4).
+ */
+static double g_loop_start_sec = 0.0;
+static double g_loop_end_sec = 0.0;
+static int g_loop_iters = 0;
+
+static void record_loop_window(double start_sec, double end_sec, int iters) {
+    g_loop_start_sec = start_sec;
+    g_loop_end_sec = end_sec;
+    g_loop_iters = iters;
+}
+
+static void print_loop_window(void) {
+    /* CLOCK_MONOTONIC es la misma fuente que time.perf_counter() en CPython/Linux,
+       asi que estas marcas son directamente comparables con las del orquestador. */
+    printf("LOOP_WINDOW start=%.9f end=%.9f iters=%d\n",
+           g_loop_start_sec, g_loop_end_sec, g_loop_iters);
+}
+
 /**
  * Validates and normalizes the precision character to uppercase.
  *
@@ -720,6 +748,7 @@ static int run_sgemm_case(
 	}
 	double end = monotonic_time_sec();
 
+	record_loop_window(start, end, run_iters);
 	*out_time_sec = (end - start) / (double)run_iters;
 	return 0;
 }
@@ -788,6 +817,7 @@ static int run_dgemm_case(
 	}
 	double end = monotonic_time_sec();
 
+	record_loop_window(start, end, run_iters);
 	*out_time_sec = (end - start) / (double)run_iters;
 	return 0;
 }
@@ -856,6 +886,7 @@ static int run_cgemm_case(
 	}
 	double end = monotonic_time_sec();
 
+	record_loop_window(start, end, run_iters);
 	*out_time_sec = (end - start) / (double)run_iters;
 	return 0;
 }
@@ -924,6 +955,7 @@ static int run_zgemm_case(
 	}
 	double end = monotonic_time_sec();
 
+	record_loop_window(start, end, run_iters);
 	*out_time_sec = (end - start) / (double)run_iters;
 	return 0;
 }
@@ -1034,5 +1066,6 @@ int main(int argc, char **argv) {
 		   final_op_b,
 		   time_sec,
 		   cli.iters);
+	print_loop_window();
 	return 0;
 }

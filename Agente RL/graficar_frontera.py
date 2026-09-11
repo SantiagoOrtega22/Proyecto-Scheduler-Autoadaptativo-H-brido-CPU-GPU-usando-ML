@@ -7,6 +7,7 @@ from stable_baselines3 import DQN
 
 # Agregar el directorio principal al PATH para importar el entorno
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from Entorno.codificador_csv import MAX_LOG2_DIM
 from Entorno.gym import PlanificadorEnv
 from estilo_graficas import (
     COLOR_CPU,
@@ -45,8 +46,9 @@ def generar_grafica_frontera():
         
         # Filtramos solo GEMM de precisión simple para ver la frontera limpia
         if is_gemm and prec_s:
-            # Revertimos la escala log2 para sacar el tamaño real N
-            N = int(round(2 ** (obs[2] * 24.0)))
+            # Revertimos la escala log2 para sacar el tamaño real N. Usa la misma
+            # constante que el codificador: si divergen, el eje X queda mal escalado.
+            N = int(round(2 ** (obs[2] * MAX_LOG2_DIM)))
             
             # La IA toma la decisión
             accion, _ = modelo.predict(obs, deterministic=True)

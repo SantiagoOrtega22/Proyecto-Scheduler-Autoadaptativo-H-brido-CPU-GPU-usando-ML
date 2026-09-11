@@ -65,9 +65,16 @@ echo "[4/4] Ejecutando Benchmarks RL..."
 #python3 -u benchmark_runner.py --benchmark gemm --mode continuous-rl --device both
 
 echo "=================== EJECUCIÓN FFT ===================="
+# --power-window-sec: duración del lazo bajo monitoreo energético. Con 0.5 s cada
+#   medición reúne ~25 muestras NVML / ~100 RAPL dentro de la ventana; bajarlo a 0.15
+#   recorta ~2.5 h del barrido completo a costa de muy pocas muestras por punto.
+# La potencia en reposo de CPU y GPU se mide automáticamente al inicio del barrido y se
+#   descuenta de ambas, para que la comparación CPU/GPU en EDP sea simétrica.
 python3 -u benchmark_runner.py --benchmark fft \
     --mode continuous-rl \
     --device both \
+    --power-window-sec 0.5 \
+    --idle-measure-sec 3 \
     --fft-sizes-1d auto \
     --fft-sizes-2d auto \
     --fft-sizes-3d auto

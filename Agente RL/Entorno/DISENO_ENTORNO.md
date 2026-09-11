@@ -40,9 +40,9 @@ Donde $\epsilon = 10^{-9}$. Maximizar $R(s, a)$ equivale estrictamente a minimiz
 | Rango de Índices | Característica | Tipo de Codificación | Valores / Regla de Transformación | Descripción |
 | :---: | :--- | :---: | :--- | :--- |
 | **`[0..1]`** | **Tipo de Kernel** | One-Hot (2D) | `GEMM` $\rightarrow [1, 0]$<br>`FFT` $\rightarrow [0, 1]$ | Identificador del tipo de algoritmo a ejecutar. |
-| **`[2]`** | **Dimensión 1** | Continuo $\log_2$ | $\frac{\log_2(\max(1, M \text{ ó } N_x))}{24.0}$ | Filas $M$ (GEMM) o dimensión $N_x$ (FFT). |
-| **`[3]`** | **Dimensión 2** | Continuo $\log_2$ | $\frac{\log_2(N)}{24.0}$ (GEMM)<br>$\frac{\log_2(N_y)}{24.0}$ si $N_y > 0$ else $0.0$ (FFT) | Columnas $N$ (GEMM) o dimensión $N_y$ en FFT 2D/3D. |
-| **`[4]`** | **Dimensión 3** | Continuo $\log_2$ | $\frac{\log_2(K)}{24.0}$ (GEMM)<br>$\frac{\log_2(N_z)}{24.0}$ si $N_z > 0$ else $0.0$ (FFT) | Dimensión común $K$ (GEMM) o dimensión $N_z$ en FFT 3D. |
+| **`[2]`** | **Dimensión 1** | Continuo $\log_2$ | $\frac{\log_2(\max(1, M \text{ ó } N_x))}{26.0}$ | Filas $M$ (GEMM) o dimensión $N_x$ (FFT). |
+| **`[3]`** | **Dimensión 2** | Continuo $\log_2$ | $\frac{\log_2(N)}{26.0}$ (GEMM)<br>$\frac{\log_2(N_y)}{26.0}$ si $N_y > 0$ else $0.0$ (FFT) | Columnas $N$ (GEMM) o dimensión $N_y$ en FFT 2D/3D. |
+| **`[4]`** | **Dimensión 3** | Continuo $\log_2$ | $\frac{\log_2(K)}{26.0}$ (GEMM)<br>$\frac{\log_2(N_z)}{26.0}$ si $N_z > 0$ else $0.0$ (FFT) | Dimensión común $K$ (GEMM) o dimensión $N_z$ en FFT 3D. |
 | **`[5]`** | **Batch Size** | Continuo $\log_2$ | $0.0$ (GEMM)<br>$\frac{\log_2(\max(1, \text{Batch}))}{16.0}$ (FFT) | Lote de transformadas FFT. |
 | **`[6..9]`** | **Precisión** | One-Hot (4D) | `S` (Float32) $\rightarrow [1, 0, 0, 0]$<br>`D` (Float64) $\rightarrow [0, 1, 0, 0]$<br>`C` (Complex64) $\rightarrow [0, 0, 1, 0]$<br>`Z` (Complex128) $\rightarrow [0, 0, 0, 1]$ | Precisión aritmética compartida. |
 | **`[10..12]`**| **GEMM OpA** | One-Hot (3D) | `N` $\rightarrow [1, 0, 0]$, `T` $\rightarrow [0, 1, 0]$, `C` $\rightarrow [0, 0, 1]$<br>*(En FFT se llena con $[0, 0, 0]$)* | Operación sobre matriz $A$. |

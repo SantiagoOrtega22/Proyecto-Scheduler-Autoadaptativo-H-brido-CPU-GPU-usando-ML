@@ -3,6 +3,16 @@ import math
 import os
 from collections import defaultdict
 
+# Techos de normalizacion logaritmica de las dimensiones. Deben cubrir el tamaño
+# maximo que el generador de cargas puede emitir, o el feature normalizado se
+# saldria del rango [0,1] que declara observation_space en gym.py.
+# MAX_LOG2_DIM = 26 corresponde a fft_max_n = 2**26 en benchmark_runner.py
+# (el techo de FFT 1D); GEMM tope en 2**14, muy por debajo.
+# Constante unica: graficar_frontera.py la importa para la transformacion inversa.
+MAX_LOG2_DIM = 26.0
+MAX_LOG2_BATCH = 16.0
+
+
 def generar_vector_22d(task_info):
     """
     Toma un diccionario con los parámetros de la tarea (GEMM o FFT)
@@ -10,8 +20,8 @@ def generar_vector_22d(task_info):
     """
     obs = [0.0] * 22
     tipo = task_info['tipo']
-    max_log2_dim = 24.0
-    max_log2_batch = 16.0
+    max_log2_dim = MAX_LOG2_DIM
+    max_log2_batch = MAX_LOG2_BATCH
 
     if tipo == 'GEMM':
         obs[0] = 1.0  # is_GEMM

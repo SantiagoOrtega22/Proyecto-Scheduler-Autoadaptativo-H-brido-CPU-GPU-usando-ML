@@ -41,6 +41,8 @@ def entrenar_agente(
     split: str = "all",
     modelo_nombre: str = "modelo_dqn_scheduler",
     log_subdir: str | None = None,
+    seed: int = BENCH_SEED,
+    timesteps: int = 100000,
 ) -> str:
     """
     Instancia el entorno PlanificadorEnv y entrena un agente DQN
@@ -56,6 +58,12 @@ def entrenar_agente(
         modelo_nombre: Nombre base (sin extensión) del archivo .zip de salida.
         log_subdir: Subcarpeta de logs_entrenamiento para TensorBoard/Monitor.
             Si es None, usa logs_entrenamiento directamente (comportamiento original).
+        seed: Semilla del DQN (init de pesos, exploración epsilon-greedy y muestreo
+            del replay buffer). Por defecto BENCH_SEED, para no alterar el modelo de
+            tesis vigente; `barrido_semillas.py` la varía para medir la varianza
+            entre corridas independientes. El split del dataset NO usa esta semilla:
+            queda fijo en BENCH_SEED para que todas las corridas vean los mismos datos.
+        timesteps: Pasos de entrenamiento del ciclo `learn()`.
 
     Returns:
         str: Ruta absoluta del modelo guardado (sin extensión .zip).
@@ -98,15 +106,13 @@ def entrenar_agente(
         exploration_final_eps=0.05,  # Terminar con un 5% mínimo de exploración continua
         tensorboard_log=log_dir,     # Ruta para ver las curvas de recompensa
         verbose=1,                   # Nivel de detalle en la consola
-        seed=BENCH_SEED               # Semilla determinista (CLAUDE.md #9)
+        seed=seed                    # Semilla determinista (CLAUDE.md #9); default BENCH_SEED
     )
 
     # 4. Ciclo de Entrenamiento
-    # Entrenaremos durante 5000 pasos lógicos a modo de prueba inicial.
-    # Dado que ahora el dataset tiene 9 filas, el agente iterará muchas veces sobre él
-    # simulando una cola infinita de tareas entrantes.
-    timesteps = 100000
-    print(f"\n--- Iniciando Aprendizaje por {timesteps} Pasos ---")
+    # El agente itera muchas veces sobre el dataset, simulando una cola infinita
+    # de tareas entrantes.
+    print(f"\n--- Iniciando Aprendizaje por {timesteps} Pasos (seed={seed}) ---")
 
     callback_precision = PrecisionCallback()
     modelo.learn(total_timesteps=timesteps, progress_bar=True, callback=callback_precision)

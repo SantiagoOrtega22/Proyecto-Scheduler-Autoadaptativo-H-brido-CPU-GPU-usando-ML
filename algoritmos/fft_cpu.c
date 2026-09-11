@@ -225,6 +225,34 @@ static double get_time_ms() {
     return ts.tv_sec * 1e3 + ts.tv_nsec * 1e-6;
 }
 
+/*
+ * Ventana de medicion energetica.
+ *
+ * El orquestador muestrea RAPL/NVML mientras el proceso esta vivo, pero solo el lazo
+ * cronometrado representa la carga que se quiere caracterizar: la creacion del plan,
+ * las reservas de memoria, la generacion determinista de datos y el cierre del proceso
+ * quedan fuera de esa carga. Publicamos los instantes CLOCK_MONOTONIC que delimitan el
+ * lazo para que el orquestador recorte las muestras a esa region; sin este recorte la
+ * energia del setup se atribuia al kernel e inflaba la potencia y la energia por
+ * iteracion (ver protocolo de aislamiento en CLAUDE.md seccion 4).
+ */
+static double g_loop_start_sec = 0.0;
+static double g_loop_end_sec = 0.0;
+static int g_loop_iters = 0;
+
+static void record_loop_window(double start_sec, double end_sec, int iters) {
+    g_loop_start_sec = start_sec;
+    g_loop_end_sec = end_sec;
+    g_loop_iters = iters;
+}
+
+static void print_loop_window(void) {
+    /* CLOCK_MONOTONIC es la misma fuente que time.perf_counter() en CPython/Linux,
+       asi que estas marcas son directamente comparables con las del orquestador. */
+    printf("LOOP_WINDOW start=%.9f end=%.9f iters=%d\n",
+           g_loop_start_sec, g_loop_end_sec, g_loop_iters);
+}
+
 /**
  * @brief Converts a string to uppercase in place.
  * @param s String to convert.
@@ -394,6 +422,7 @@ static void print_result(const FftConfig *cfg, double time_sec, double gflops) {
         gflops,
         time_sec
     );
+    print_loop_window();
 }
 
 /**
@@ -472,7 +501,9 @@ static void benchmark_fft_double(const FftConfig *cfg) {
         for (int i = 0; i < run_iters; ++i) {
             fftw_execute(plan);
         }
-        double elapsed_ms = (get_time_ms() - start) / run_iters;
+        double loop_end_ms = get_time_ms();
+        record_loop_window(start / 1e3, loop_end_ms / 1e3, run_iters);
+        double elapsed_ms = (loop_end_ms - start) / run_iters;
         double time_sec = elapsed_ms / 1e3;
         double gflops = flops / (time_sec * 1e9);
 
@@ -569,7 +600,9 @@ static void benchmark_fft_double(const FftConfig *cfg) {
         for (int i = 0; i < run_iters; ++i) {
             fftw_execute(plan);
         }
-        double elapsed_ms = (get_time_ms() - start) / run_iters;
+        double loop_end_ms = get_time_ms();
+        record_loop_window(start / 1e3, loop_end_ms / 1e3, run_iters);
+        double elapsed_ms = (loop_end_ms - start) / run_iters;
         double time_sec = elapsed_ms / 1e3;
         double gflops = flops / (time_sec * 1e9);
 
@@ -659,7 +692,9 @@ static void benchmark_fft_double(const FftConfig *cfg) {
         for (int i = 0; i < run_iters; ++i) {
             fftw_execute(plan);
         }
-        double elapsed_ms = (get_time_ms() - start) / run_iters;
+        double loop_end_ms = get_time_ms();
+        record_loop_window(start / 1e3, loop_end_ms / 1e3, run_iters);
+        double elapsed_ms = (loop_end_ms - start) / run_iters;
         double time_sec = elapsed_ms / 1e3;
         double gflops = flops / (time_sec * 1e9);
 
@@ -752,7 +787,9 @@ static void benchmark_fft_float(const FftConfig *cfg) {
         for (int i = 0; i < run_iters; ++i) {
             fftwf_execute(plan);
         }
-        double elapsed_ms = (get_time_ms() - start) / run_iters;
+        double loop_end_ms = get_time_ms();
+        record_loop_window(start / 1e3, loop_end_ms / 1e3, run_iters);
+        double elapsed_ms = (loop_end_ms - start) / run_iters;
         double time_sec = elapsed_ms / 1e3;
         double gflops = flops / (time_sec * 1e9);
 
@@ -849,7 +886,9 @@ static void benchmark_fft_float(const FftConfig *cfg) {
         for (int i = 0; i < run_iters; ++i) {
             fftwf_execute(plan);
         }
-        double elapsed_ms = (get_time_ms() - start) / run_iters;
+        double loop_end_ms = get_time_ms();
+        record_loop_window(start / 1e3, loop_end_ms / 1e3, run_iters);
+        double elapsed_ms = (loop_end_ms - start) / run_iters;
         double time_sec = elapsed_ms / 1e3;
         double gflops = flops / (time_sec * 1e9);
 
@@ -927,7 +966,9 @@ static void benchmark_fft_float(const FftConfig *cfg) {
         for (int i = 0; i < run_iters; ++i) {
             fftwf_execute(plan);
         }
-        double elapsed_ms = (get_time_ms() - start) / run_iters;
+        double loop_end_ms = get_time_ms();
+        record_loop_window(start / 1e3, loop_end_ms / 1e3, run_iters);
+        double elapsed_ms = (loop_end_ms - start) / run_iters;
         double time_sec = elapsed_ms / 1e3;
         double gflops = flops / (time_sec * 1e9);
 
