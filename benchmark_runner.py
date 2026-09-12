@@ -511,7 +511,7 @@ def parse_fft_layouts(raw):
     return values
 
 
-def parse_fft_shapes(raw, dims, min_n=None):
+def parse_fft_shapes(raw, dims, min_n=None, max_n=None):
     """Traduce la especificacion de tamanos FFT a una lista de formas (nx, ny, nz).
 
     Args:
@@ -521,6 +521,10 @@ def parse_fft_shapes(raw, dims, min_n=None):
         min_n: Piso opcional del barrido, solo efectivo para 1D con "auto". Permite
             generar unicamente el tramo de tamanos pequenos que falte, sin repetir
             el rango ya medido.
+        max_n: Techo opcional del barrido, solo efectivo para 1D con "auto". Se usa
+            junto con min_n para acotar la rejilla a un tramo especifico (p. ej.
+            [min_n, 4095] para generar solo tamanos por debajo del piso historico
+            de 4096 sin re-generar el rango ya medido por encima).
 
     Returns:
         list: Formas (nx, ny, nz) a ejecutar.
@@ -531,8 +535,8 @@ def parse_fft_shapes(raw, dims, min_n=None):
     if raw_lower in ("auto", "octave", "default"):
         db_mgr_mod = _get_data_bank_manager_module()
         algo_name = f"fft_{dims}d" if dims in (2, 3) else "fft_1d"
-        if dims == 1 and min_n is not None:
-            sizes = db_mgr_mod.generate_size_sweep(algorithm=algo_name, min_n=min_n)
+        if dims == 1 and (min_n is not None or max_n is not None):
+            sizes = db_mgr_mod.generate_size_sweep(algorithm=algo_name, min_n=min_n, max_n=max_n)
         else:
             sizes = db_mgr_mod.generate_size_sweep(algorithm=algo_name)
         if dims == 1:
@@ -1934,7 +1938,7 @@ def run_fft(args):
     if args.mode == "continuous-rl":
         shapes = []
         if args.fft_sizes_1d and args.fft_sizes_1d.strip():
-            shapes.extend(parse_fft_shapes(args.fft_sizes_1d, 1, min_n=args.fft_min_n))
+            shapes.extend(parse_fft_shapes(args.fft_sizes_1d, 1, min_n=args.fft_min_n, max_n=args.fft_max_n))
         if args.fft_sizes_2d and args.fft_sizes_2d.strip():
             shapes.extend(parse_fft_shapes(args.fft_sizes_2d, 2))
         if args.fft_sizes_3d and args.fft_sizes_3d.strip():
@@ -1952,7 +1956,7 @@ def run_fft(args):
             sizes = generator.generate()
             shapes = [(n, 0, 0) for n in sizes]
     else:
-        sizes_1d = parse_fft_shapes(args.fft_sizes_1d, 1, min_n=args.fft_min_n)
+        sizes_1d = parse_fft_shapes(args.fft_sizes_1d, 1, min_n=args.fft_min_n, max_n=args.fft_max_n)
         sizes_2d = parse_fft_shapes(args.fft_sizes_2d, 2)
         sizes_3d = parse_fft_shapes(args.fft_sizes_3d, 3)
         shapes = sizes_1d + sizes_2d + sizes_3d

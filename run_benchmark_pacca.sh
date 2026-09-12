@@ -70,14 +70,19 @@ echo "=================== EJECUCIÓN FFT ===================="
 #   recorta ~2.5 h del barrido completo a costa de muy pocas muestras por punto.
 # La potencia en reposo de CPU y GPU se mide automáticamente al inicio del barrido y se
 #   descuenta de ambas, para que la comparación CPU/GPU en EDP sea simétrica.
-python3 -u benchmark_runner.py --benchmark fft \
-    --mode continuous-rl \
-    --device both \
-    --power-window-sec 0.5 \
-    --idle-measure-sec 3 \
-    --fft-sizes-1d auto \
-    --fft-sizes-2d auto \
-    --fft-sizes-3d auto
+
+#python3 -u benchmark_runner.py --benchmark fft \
+ #   --mode continuous-rl \
+  # --power-window-sec 0.5 \
+    # --idle-measure-sec 3 \
+    #--fft-sizes-1d auto \
+    #--fft-sizes-2d auto \
+    #--fft-sizes-3d auto
+python3 -u benchmark_runner.py --benchmark fft --device both \
+    --fft-sizes-1d auto --fft-min-n 64 --fft-max-n 4095 \
+    --fft-sizes-2d " " --fft-sizes-3d " " \
+    --power-window-sec 0.5 --idle-measure-sec 3 \
+    --output fft_1d_pequenos.csv
 
 echo "================================================================="
 echo "Finalizado con éxito a las: $(date)"
