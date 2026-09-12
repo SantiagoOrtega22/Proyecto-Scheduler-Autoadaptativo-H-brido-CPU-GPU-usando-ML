@@ -343,6 +343,14 @@ static double sum_log2_dims(int rank, const int dims[3]) {
 
 #include <stdint.h>
 
+/* Techo del autodimensionado de iteraciones. Solo aplica cuando el orquestador
+   pasa iters<=0 (fase de aislamiento) y el binario elige el numero por su cuenta.
+   El valor anterior (20000) quedaba corto en tamanos pequenos: con iteraciones de
+   pocos microsegundos no alcanzaba a cubrir la ventana objetivo, reduciendo el
+   promedio temporal. El lazo reutiliza los buffers, asi que subirlo no reserva
+   memoria adicional. */
+#define MAX_AUTO_ITERS 500000
+
 static inline uint64_t bench_lcg_next(uint64_t *state) {
     *state = (*state * 6364136223846793005ULL + 1442695040888963407ULL);
     return *state;
@@ -548,7 +556,7 @@ static void benchmark_fft_float(const FftConfig *cfg) {
             double t1rep = t1 - t0;
             run_iters = (int)(0.15 / (t1rep > 1e-9 ? t1rep : 1e-9));
             if (run_iters < 5) run_iters = 5;
-            if (run_iters > 20000) run_iters = 20000;
+            if (run_iters > MAX_AUTO_ITERS) run_iters = MAX_AUTO_ITERS;
         }
 
         CHECK_CUDA(cudaDeviceSynchronize());
@@ -630,7 +638,7 @@ static void benchmark_fft_float(const FftConfig *cfg) {
             double t1rep = t1 - t0;
             run_iters = (int)(0.15 / (t1rep > 1e-9 ? t1rep : 1e-9));
             if (run_iters < 5) run_iters = 5;
-            if (run_iters > 20000) run_iters = 20000;
+            if (run_iters > MAX_AUTO_ITERS) run_iters = MAX_AUTO_ITERS;
         }
 
         CHECK_CUDA(cudaDeviceSynchronize());
@@ -708,7 +716,7 @@ static void benchmark_fft_float(const FftConfig *cfg) {
             double t1rep = t1 - t0;
             run_iters = (int)(0.15 / (t1rep > 1e-9 ? t1rep : 1e-9));
             if (run_iters < 5) run_iters = 5;
-            if (run_iters > 20000) run_iters = 20000;
+            if (run_iters > MAX_AUTO_ITERS) run_iters = MAX_AUTO_ITERS;
         }
 
         CHECK_CUDA(cudaDeviceSynchronize());
@@ -863,7 +871,7 @@ static void benchmark_fft_double(const FftConfig *cfg) {
             double t1rep = t1 - t0;
             run_iters = (int)(0.15 / (t1rep > 1e-9 ? t1rep : 1e-9));
             if (run_iters < 5) run_iters = 5;
-            if (run_iters > 20000) run_iters = 20000;
+            if (run_iters > MAX_AUTO_ITERS) run_iters = MAX_AUTO_ITERS;
         }
 
         CHECK_CUDA(cudaDeviceSynchronize());
@@ -945,7 +953,7 @@ static void benchmark_fft_double(const FftConfig *cfg) {
             double t1rep = t1 - t0;
             run_iters = (int)(0.15 / (t1rep > 1e-9 ? t1rep : 1e-9));
             if (run_iters < 5) run_iters = 5;
-            if (run_iters > 20000) run_iters = 20000;
+            if (run_iters > MAX_AUTO_ITERS) run_iters = MAX_AUTO_ITERS;
         }
 
         CHECK_CUDA(cudaDeviceSynchronize());
@@ -1023,7 +1031,7 @@ static void benchmark_fft_double(const FftConfig *cfg) {
             double t1rep = t1 - t0;
             run_iters = (int)(0.15 / (t1rep > 1e-9 ? t1rep : 1e-9));
             if (run_iters < 5) run_iters = 5;
-            if (run_iters > 20000) run_iters = 20000;
+            if (run_iters > MAX_AUTO_ITERS) run_iters = MAX_AUTO_ITERS;
         }
 
         CHECK_CUDA(cudaDeviceSynchronize());

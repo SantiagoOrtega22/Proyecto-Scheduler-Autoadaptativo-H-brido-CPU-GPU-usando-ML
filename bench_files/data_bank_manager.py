@@ -46,6 +46,14 @@ SEED: int = 42
 # dentro de cada octava (ver generate_size_sweep).
 FFT_1D_OFFSET_DESALINEACION: int = 67
 
+# Ancho de octava sobre el que se calibró el offset de 67 (la octava 2^12, que era
+# el piso histórico del barrido). Por encima de este ancho el offset se mantiene
+# fijo en 67 para que el dataset ya recolectado siga siendo reproducible; por
+# debajo se escala en la misma proporción (67/4096 ≈ 1.6% del ancho), porque un
+# +67 fijo excede el ancho de las octavas pequeñas y lanzaría el tamaño fuera de
+# su propia octava (en 2^4 el offset es 419% del ancho: 18 se convertiría en 85).
+FFT_1D_ANCHO_OCTAVA_REFERENCIA: int = 4096
+
 _PREC_LABEL: dict = {"S": "s", "D": "d", "C": "c", "Z": "z"}
 _DOM_LABEL: dict = {"C2C": "c2c", "R2C": "r2c", "C2R": "c2r"}
 
@@ -65,7 +73,11 @@ _REAL_PART: dict = {
 
 # ── Generación de la lista de tamaños ─────────────────────────────────────────
 
-def generate_size_sweep(max_n: Optional[int] = None, algorithm: str = "gemm") -> List[int]:
+def generate_size_sweep(
+    max_n: Optional[int] = None,
+    algorithm: str = "gemm",
+    min_n: Optional[int] = None,
+) -> List[int]:
     """Genera la lista de tamaños N de acuerdo al algoritmo y el rango especificado.
 
     Para GEMM:
@@ -73,13 +85,19 @@ def generate_size_sweep(max_n: Optional[int] = None, algorithm: str = "gemm") ->
         y un aumento de 2x por cada potencia de 2 (el rango [512, 1024) tiene salto de +16).
 
     Para FFT 1D ('fft' o 'fft_1d'):
-        Empieza desde 2^12 (4096) a 2^26 (67108864), con esquema de octavas de 32 puntos
-        por octava (step = ancho_octava / 32). Dentro de cada octava, el punto ancla
-        (j=0, la potencia de 2 exacta) y el primer punto regular (j=1) quedan limpios;
-        a partir de ahí se intercala una desalineación de +FFT_1D_OFFSET_DESALINEACION (67)
-        cada dos muestras (j par >= 2 recibe el offset, j impar no). La rejilla usada para
+        Empieza desde 2^12 (4096), o desde min_n si se especifica, hasta 2^26 (67108864),
+        con esquema de octavas de 32 puntos por octava (step = ancho_octava / 32). Dentro
+        de cada octava, el punto ancla (j=0, la potencia de 2 exacta) y el primer punto
+        regular (j=1) quedan limpios; a partir de ahí se intercala una desalineación cada
+        dos muestras (j par >= 2 recibe el offset, j impar no). La rejilla usada para
         calcular el siguiente salto siempre se basa en el valor regular (sin offset), de modo
         que el offset no se acumula de una muestra a la siguiente.
+
+        El offset vale FFT_1D_OFFSET_DESALINEACION (67) desde la octava 2^12 hacia arriba
+        y se escala proporcionalmente al ancho por debajo de ella, porque un +67 fijo supera
+        el ancho de las octavas chicas y sacaría el tamaño de su propia octava. En las
+        octavas donde el salto regular ya está saturado en 1 (2^5 y menores) no queda sitio
+        para desalinear sin duplicar la muestra siguiente, y el offset se anula.
 
     Para FFT 2D ('fft_2d'):
         Rango de 16x16 (2^4) a 8192x8192 (2^13). Esquema de octavas con 32 puntos por octava.
@@ -93,6 +111,9 @@ def generate_size_sweep(max_n: Optional[int] = None, algorithm: str = "gemm") ->
         max_n: Techo opcional del barrido. Si es None, usa el máximo natural
                del algoritmo (16384 para GEMM, 67108864 para FFT 1D, 8192 para 2D, 256 para 3D).
         algorithm: Algoritmo objetivo ('gemm', 'fft'/'fft_1d', 'fft_2d', 'fft_3d').
+        min_n: Piso opcional del barrido, solo para FFT 1D. Si es None mantiene el piso
+               histórico de 4096; sirve para generar únicamente el tramo de tamaños
+               pequeños que falte, sin volver a medir el rango ya recolectado.
 
     Returns:
         List[int]: Lista ordenada de tamaños N.
@@ -128,9 +149,14 @@ def generate_size_sweep(max_n: Optional[int] = None, algorithm: str = "gemm") ->
         limit_n = min(max_n, 67108864) if max_n is not None else 67108864
         sizes: List[int] = []
         puntos_por_octava = 32
-        k_start = 12  # 2^12 = 4096
+        # Piso del barrido. Por defecto 2^12 = 4096, el rango histórico; min_n
+        # permite bajarlo para completar el dataset con tamaños menores sin
+        # regenerar (ni volver a medir) el rango que ya está recolectado.
+        k_start = 12
+        if min_n is not None and min_n > 0:
+            k_start = max(0, (max(1, min_n)).bit_length() - 1)
         k_end = (limit_n - 1).bit_length()
-        
+
         for k in range(k_start, min(k_end, 26)):
             interval_start = 2**k
             interval_end = 2**(k + 1)
@@ -138,15 +164,32 @@ def generate_size_sweep(max_n: Optional[int] = None, algorithm: str = "gemm") ->
             step_exact = ancho_octava / puntos_por_octava
             step = max(1, int(round(step_exact)))
 
+            # Offset de desalineación escalado al ancho de la octava. Se conserva
+            # exactamente en 67 desde la octava de referencia hacia arriba, para no
+            # alterar los tamaños ya medidos.
+            if ancho_octava >= FFT_1D_ANCHO_OCTAVA_REFERENCIA:
+                offset = FFT_1D_OFFSET_DESALINEACION
+            else:
+                offset = max(1, int(round(
+                    ancho_octava * FFT_1D_OFFSET_DESALINEACION
+                    / FFT_1D_ANCHO_OCTAVA_REFERENCIA
+                )))
+            # El offset debe caber DENTRO del salto regular; si lo iguala o lo supera,
+            # el valor desalineado coincide con la siguiente muestra limpia y se
+            # generarían duplicados. Ocurre en las octavas más chicas (2^5 y abajo),
+            # donde step ya está saturado en 1 y no queda sitio para desalinear.
+            if offset >= step:
+                offset = 0
+
             n = interval_start
             j = 0
             while n < interval_end and n <= limit_n:
                 # j=0 (ancla de octava) y j=1 (primer salto regular) quedan limpios;
-                # desde j=2 se intercala +67 cada dos muestras. La variable `n` que
-                # alimenta el siguiente salto nunca se contamina con el offset.
-                aplica_offset = j > 0 and j % 2 == 0
-                valor = n + FFT_1D_OFFSET_DESALINEACION if aplica_offset else n
-                if valor <= limit_n:
+                # desde j=2 se intercala el offset cada dos muestras. La variable `n`
+                # que alimenta el siguiente salto nunca se contamina con el offset.
+                aplica_offset = offset > 0 and j > 0 and j % 2 == 0
+                valor = n + offset if aplica_offset else n
+                if valor <= limit_n and valor >= (min_n or 0):
                     sizes.append(valor)
                 n += step
                 j += 1

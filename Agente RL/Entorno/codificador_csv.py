@@ -13,12 +13,68 @@ MAX_LOG2_DIM = 26.0
 MAX_LOG2_BATCH = 16.0
 
 
-def generar_vector_22d(task_info):
+def max_prime_factor(n):
+    """Devuelve el mayor factor primo de n (1 para n <= 1).
+
+    Args:
+        n (int): Entero positivo a factorizar.
+
+    Returns:
+        int: El mayor factor primo de n, o 1 si n <= 1.
+    """
+    n = int(n)
+    if n <= 1:
+        return 1
+    mayor = 1
+    d = 2
+    while d * d <= n:
+        while n % d == 0:
+            mayor = d
+            n //= d
+        d += 1 if d == 2 else 2
+    return max(mayor, n)
+
+
+def feature_radix(nx, ny=0, nz=0):
+    """Codifica la hostilidad de una forma de FFT para la librería, en [0, 1].
+
+    FFTW resuelve a velocidad plena las longitudes cuyos factores primos tienen
+    codelet nativo (<= 13) y cae a Rader/Bluestein en cuanto aparece un primo
+    mayor. En el barrido de paccaA100 el rendimiento relativo de CPU decae de
+    forma monótona con el mayor factor primo (1.00 para <= 13, 0.84 en 17..31,
+    0.49 en 37..127, 0.15 por encima), mientras cuFFT se mantiene plano. Esa
+    asimetría es la que decide la frontera CPU/GPU en FFT.
+
+    Se codifica de forma CONTINUA, no como one-hot de clase: la penalización es
+    monótona en log2 del mayor primo y sigue creciendo dentro de la clase
+    "bluestein" (0.49 frente a 0.15), gradiente que un one-hot descartaría.
+    Se normaliza con MAX_LOG2_DIM porque el mayor primo nunca excede la propia
+    dimensión, así que el cociente queda acotado a [0, 1] como exige gym.py.
+
+    Args:
+        nx (int): Dimensión Nx de la transformada.
+        ny (int): Dimensión Ny, o 0 si la FFT es 1D.
+        nz (int): Dimensión Nz, o 0 si la FFT no es 3D.
+
+    Returns:
+        float: log2(mayor factor primo) / MAX_LOG2_DIM, en [0, 1]. El minimo
+            alcanzable por una FFT real es 1/26 ~ 0.0385 (potencias de 2, mayor
+            primo = 2); solo devuelve 0.0 exacto si no hay dimension valida, que
+            es tambien el valor que toma el feature en tareas GEMM.
+    """
+    dims = [int(d) for d in (nx, ny, nz) if int(d) > 0]
+    if not dims:
+        return 0.0
+    mayor = max(max_prime_factor(d) for d in dims)
+    return math.log2(mayor) / MAX_LOG2_DIM if mayor > 1 else 0.0
+
+
+def generar_vector_23d(task_info):
     """
     Toma un diccionario con los parámetros de la tarea (GEMM o FFT)
-    y retorna el vector de 22 dimensiones One-Hot según DISENO_ENTORNO.md.
+    y retorna el vector de 23 dimensiones One-Hot según DISENO_ENTORNO.md.
     """
-    obs = [0.0] * 22
+    obs = [0.0] * 23
     tipo = task_info['tipo']
     max_log2_dim = MAX_LOG2_DIM
     max_log2_batch = MAX_LOG2_BATCH
@@ -62,6 +118,11 @@ def generar_vector_22d(task_info):
         layout = str(task_info.get('Layout', 'I')).upper()
         if layout == 'I': obs[20] = 1.0
         elif layout == 'O': obs[21] = 1.0
+
+        # Estructura de radix. Se deriva de las dimensiones en vez de leer la
+        # columna Radix_Class del CSV, para que el codificador siga funcionando
+        # con los datasets generados antes de que esa columna existiera.
+        obs[22] = feature_radix(task_info['Nx'], ny, nz)
         
     prec = str(task_info.get('Precision', 'S')).upper()
     if prec == 'S': obs[6] = 1.0
@@ -127,8 +188,15 @@ def procesar_csvs(csv_gemm=None, csv_fft=None, csv_salida=None):
         "OpB_N", "OpB_T", "OpB_C",
         "Dom_C2C", "Dom_R2C",
         "Dir_F", "Dir_I",
-        "Layout_I", "Layout_O"
+        "Layout_I", "Layout_O",
+        "Radix_log2",
     ]
+    # El volcado se arma con enumerate(columnas_obs), que trunca en silencio si la
+    # lista se queda corta respecto al vector. Se verifica explicitamente para que
+    # una futura dimension nueva falle de inmediato en vez de perderse sin aviso.
+    assert len(columnas_obs) == len(generar_vector_23d(
+        {"tipo": "FFT", "Nx": 2, "Ny": 0, "Nz": 0}
+    )), "columnas_obs no coincide con la longitud del vector de observacion"
     columnas_metricas = ["cpu_time", "cpu_energy", "cpu_edp", "gpu_time", "gpu_energy", "gpu_edp"]
     
     with open(csv_salida, 'w', newline='', encoding='utf-8') as f_out:
@@ -147,7 +215,7 @@ def procesar_csvs(csv_gemm=None, csv_fft=None, csv_salida=None):
                 'M': key[0], 'N': key[1], 'K': key[2],
                 'Precision': key[3], 'OpA': key[4], 'OpB': key[5]
             }
-            obs = generar_vector_22d(task_info)
+            obs = generar_vector_23d(task_info)
             
             fila_salida = {col: obs[i] for i, col in enumerate(columnas_obs)}
             fila_salida.update({
@@ -171,7 +239,7 @@ def procesar_csvs(csv_gemm=None, csv_fft=None, csv_salida=None):
                 'Nx': key[0], 'Ny': key[1], 'Nz': key[2], 'Batch': key[3],
                 'Precision': key[4], 'Domain': key[5], 'Direction': key[6], 'Layout': key[7]
             }
-            obs = generar_vector_22d(task_info)
+            obs = generar_vector_23d(task_info)
             
             fila_salida = {col: obs[i] for i, col in enumerate(columnas_obs)}
             fila_salida.update({

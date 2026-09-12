@@ -20,14 +20,51 @@ Espacio discreto binario: `spaces.Discrete(2)`.
 * **$a = 1$**: Despachar y ejecutar la tarea en la **GPU** (cuBLAS / cuFFT).
 
 ### 2.2. Espacio de Estados / Observaciones ($\mathcal{S}$)
-Espacio continuo acotado: `spaces.Box(low=0.0, high=1.0, shape=(22,), dtype=np.float32)`.
+Espacio continuo acotado: `spaces.Box(low=0.0, high=1.0, shape=(23,), dtype=np.float32)`.
 
-Vector unificado de **22 dimensiones** con **One-Hot Encoding** para variables categóricas y **escalado $\log_2$ normalizado** para dimensiones cuantitativas.
+Vector unificado de **23 dimensiones** con **One-Hot Encoding** para variables categóricas y **escalado $\log_2$ normalizado** para dimensiones cuantitativas.
 
 ### 2.3. Función de Recompensa ($\mathcal{R}$)
-$$R(s, a) = -\ln(\text{EDP} + \epsilon)$$
+$$R(s, a) = \frac{\text{EDP}_{max}(s) - \text{EDP}(s, a)}{\text{EDP}_{max}(s)}$$
 
-Donde $\epsilon = 10^{-9}$. Maximizar $R(s, a)$ equivale estrictamente a minimizar el EDP medido en el CSV.
+Donde $\text{EDP}_{max}(s) = \max(\text{EDP}_{cpu}(s), \text{EDP}_{gpu}(s))$ es el EDP del **peor**
+dispositivo para esa misma tarea. El resultado queda acotado en $[0, 1]$: vale $0$ al elegir el
+peor dispositivo y $1 - \text{EDP}_{min}/\text{EDP}_{max}$ al elegir el mejor. Maximizar
+$R(s,a)$ sigue equivaliendo estrictamente a minimizar el EDP medido en el CSV, porque
+$\text{EDP}_{max}(s)$ es constante dentro de un mismo estado.
+
+#### Por qué se reemplazó $R = -\ln(\text{EDP} + \epsilon)$
+
+La fórmula anterior usaba el valor **absoluto** del EDP. En el dataset de `paccaA100` ese valor
+abarca ~32 nats entre la tarea más pequeña y la más grande — una amplitud que depende del tamaño
+de $N$, no de si la decisión CPU/GPU fue correcta. Como la red comparte pesos entre todas las
+tareas y, con $\gamma = 0$, el objetivo de regresión de $Q$ es el reward inmediato, esa variación
+de escala ahogaba la señal útil: la diferencia de recompensa entre acertar y fallar es de solo
+$0.4$–$3.3$ nats. El resultado medido fue un agente que colapsaba a "siempre GPU" ($99.91\%$ de
+sus decisiones) y se estancaba en $\approx 93\%$ de precisión, sin mejorar al triplicar los pasos
+de entrenamiento.
+
+La normalización por $\text{EDP}_{max}(s)$ corrige dos cosas a la vez:
+
+1. **Elimina la varianza de escala entre tareas.** Al dividir por una cantidad de la propia tarea,
+   el reward vive siempre en $[0,1]$ sin importar si la tarea tarda microsegundos o segundos.
+2. **Comprime los extremos.** Por ser una función saturante del cociente (y no logarítmica), una
+   tarea donde la GPU gana por $20{,}000\times$ deja de pesar desproporcionadamente más que una
+   donde gana por $1.5\times$.
+
+Efecto medido sobre la razón entre el margen de la clase mayoritaria y el de la minoritaria
+(mediana del margen de recompensa entre acertar y fallar):
+
+| Dataset | $-\ln(\text{EDP})$ | Normalizada |
+| :--- | :---: | :---: |
+| FFT | $8.05\times$ | $2.85\times$ |
+| GEMM | $0.53\times$ | $0.82\times$ |
+| Mixto | $0.98\times$ | $1.00\times$ |
+
+> **Compatibilidad:** el cambio de escala de la recompensa invalida los modelos entrenados con la
+> fórmula anterior y las curvas de `ep_rew_mean` en TensorBoard no son comparables entre ambas.
+> La métrica `metricas_personalizadas/precision` sí sigue siendo comparable, porque se calcula
+> contra $\arg\min(\text{EDP}_{cpu}, \text{EDP}_{gpu})$ y no depende de la recompensa.
 
 ### 2.4. Política de Episodios One-Shot
 * **Episodio**: Configurable mediante `tasks_per_episode` (por defecto $1$ para decisiones puras One-Shot por tarea, o secuencias de $N$ tareas).
@@ -35,7 +72,7 @@ Donde $\epsilon = 10^{-9}$. Maximizar $R(s, a)$ equivale estrictamente a minimiz
 
 ---
 
-## 3. Estructura del Vector de Observación (22D)
+## 3. Estructura del Vector de Observación (23D)
 
 | Rango de Índices | Característica | Tipo de Codificación | Valores / Regla de Transformación | Descripción |
 | :---: | :--- | :---: | :--- | :--- |
@@ -50,3 +87,32 @@ Donde $\epsilon = 10^{-9}$. Maximizar $R(s, a)$ equivale estrictamente a minimiz
 | **`[16..17]`**| **FFT Dominio** | One-Hot (2D) | `C2C` $\rightarrow [1, 0]$, `R2C` $\rightarrow [0, 1]$<br>*(En GEMM se llena con $[0, 0]$)* | Complejo a Complejo o Real a Complejo. |
 | **`[18..19]`**| **FFT Dirección**| One-Hot (2D) | `Forward (F)` $\rightarrow [1, 0]$, `Inverse (I)` $\rightarrow [0, 1]$<br>*(En GEMM se llena con $[0, 0]$)* | Dirección de la transformada FFT. |
 | **`[20..21]`**| **FFT Layout** | One-Hot (2D) | `In-Place (I)` $\rightarrow [1, 0]$, `Out-of-Place (O)` $\rightarrow [0, 1]$<br>*(En GEMM se llena con $[0, 0]$)* | Ubicación en memoria de los buffers. |
+| **`[22]`** | **FFT Estructura de Radix** | Continuo $\log_2$ | $\frac{\log_2(\max\text{-primo}(N_x, N_y, N_z))}{26.0}$<br>*(En GEMM se llena con $0.0$)* | Mayor factor primo de las dimensiones. Determina si FFTW usa codelet nativo o cae a Rader/Bluestein. |
+
+
+### 3.1. Nota sobre `[22]` — Estructura de Radix
+
+Se añadió tras auditar el barrido FFT de `paccaA100` (job 6924, 25.184 filas). El
+rendimiento de CPU relativo a un tamaño 5-smooth de la misma octava decae de forma
+**monótona** con el mayor factor primo de las dimensiones:
+
+| Mayor factor primo | GFLOPS relativos CPU | GFLOPS relativos GPU |
+| :--- | :---: | :---: |
+| $\le 13$ (codelet nativo FFTW) | 1.00 | 1.00 |
+| 17 – 31 (radix genérico) | 0.84 | 1.02 |
+| 37 – 127 (Rader/Bluestein) | 0.49 | 1.02 |
+| $> 127$ | **0.15** | 0.89 |
+
+cuFFT es prácticamente insensible, así que esta variable **es** la frontera CPU/GPU en
+FFT. Sin ella, dos tamaños separados un 2–4 % (indistinguibles en `obs[2]`) pueden tener
+EDP de CPU que difieren por factores de hasta $10^4$, y el agente no dispone de ninguna
+señal para separarlos: la recompensa le resulta ruido.
+
+Se codifica **continua y no como one-hot de clase** porque la penalización sigue creciendo
+dentro de la clase `bluestein` (0.49 frente a 0.15), gradiente que un one-hot descartaría;
+además cuesta 1 dimensión en lugar de 4.
+
+> **Compatibilidad:** el cambio de 22D a 23D invalida los checkpoints entrenados con el
+> espacio anterior. Hay que re-entrenar. `codificador_csv.feature_radix()` deriva el valor
+> de `Nx/Ny/Nz`, así que los CSV anteriores a la columna `Radix_Class` siguen siendo
+> utilizables sin regenerarlos.

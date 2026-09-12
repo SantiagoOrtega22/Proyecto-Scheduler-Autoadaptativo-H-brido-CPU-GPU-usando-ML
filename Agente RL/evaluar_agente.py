@@ -78,10 +78,14 @@ def generar_grafica_comparativa(
     plt.savefig(img_salida, dpi=300)
     print(f"[ÉXITO] Gráfica generada en: {img_salida}")
 
-def evaluar_comparativa_extendida(num_muestras: int = 200):
+def evaluar_comparativa_extendida(num_muestras: int = 200, dataset: str | None = None):
     base_dir = os.path.dirname(os.path.abspath(__file__))
     modelo_path = os.path.join(base_dir, "modelo_dqn_scheduler.zip")
-    csv_path = os.path.join(base_dir, "Entorno", "dataset_pacca.csv")
+    # Debe apuntar al MISMO dataset con el que se entrenó modelo_dqn_scheduler.zip
+    # (el nombre de archivo no queda registrado dentro del .zip). Por defecto se
+    # asume dataset_pacca.csv por compatibilidad con corridas previas; para
+    # evaluar una prueba FFT-only o el dataset mixto, pasar --dataset.
+    csv_path = dataset if dataset else os.path.join(base_dir, "Entorno", "dataset_pacca.csv")
     img_salida_dispositivos = os.path.join(base_dir, "grafica_comparativa_dispositivos.png")
     img_salida_heuristicas = os.path.join(base_dir, "grafica_comparativa_heuristicas.png")
     csv_salida = os.path.join(base_dir, "tabla_comparativa_tesis.csv")
@@ -281,5 +285,11 @@ def evaluar_comparativa_extendida(num_muestras: int = 200):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-n", "--muestras", type=int, default=200, help="Cantidad de tareas")
+    parser.add_argument(
+        "--dataset", type=str, default=None,
+        help="Ruta al CSV codificado (salida de codificador_csv.py) a evaluar. "
+             "Debe coincidir con el dataset usado para entrenar modelo_dqn_scheduler.zip. "
+             "Por defecto: Entorno/dataset_pacca.csv.",
+    )
     args = parser.parse_args()
-    evaluar_comparativa_extendida(num_muestras=args.muestras)
+    evaluar_comparativa_extendida(num_muestras=args.muestras, dataset=args.dataset)

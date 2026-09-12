@@ -61,6 +61,16 @@ Interpretacion:
 Las cinco últimas columnas existen para poder auditar a posteriori que la energía se
 integró sobre el lazo y no sobre el proceso completo.
 
+Solo FFT, descriptores de estructura de la transformada:
+    Max_Prime_Factor -> Mayor factor primo entre Nx, Ny y Nz.
+    Radix_Class      -> "pow2" | "codelet" (primo <= 13) | "radix_gen" (<= 31) | "bluestein".
+
+Ambas son función únicamente de la forma, no de la medición. Determinan qué algoritmo
+elige FFTW: con codelet nativo la transformada corre a velocidad plena, y sin él hay que
+caer a Rader/Bluestein. En el barrido de paccaA100 esto cuesta hasta 6.7x en GFLOPS de CPU
+mientras cuFFT queda prácticamente plano, así que es la variable que más pesa en la
+frontera CPU/GPU de FFT y no es deducible de log2(N) por sí solo.
+
 NOTAS HPC Y RIGOR
 -----------------
     - Aislamiento de Métricas: Cada prueba ejecuta el binario dos veces. La primera (sin hilos de monitoreo) obtiene el tiempo exacto; la segunda (con hilos de lectura NVML/RAPL activos) extrae el perfil energético.
@@ -342,6 +352,17 @@ RAPL_SAMPLE_INTERVAL_SEC = 0.005
 POWER_WINDOW_TARGET_SEC = 0.5
 # Minimo de muestras crudas dentro de la ventana para aceptar la medicion.
 MIN_SAMPLES_IN_WINDOW = 2
+
+# Techo de iteraciones del lazo bajo monitoreo. Existe como valvula de seguridad: si la
+# fase de aislamiento midiera un time_sec anomalo cercano a cero, el cociente
+# POWER_WINDOW_TARGET_SEC/time_sec se dispararia y el lazo correria sin control.
+# El valor anterior (20 000) resultaba corto para tamanos pequenos: con N=1024 en CPU
+# cada iteracion dura ~3.6 us, de modo que 20 000 iteraciones solo llenaban 0.072 s de la
+# ventana objetivo de 0.5 s, dejando 14 muestras de potencia en vez de ~25. El lazo
+# reutiliza los mismos buffers en cada vuelta (no hay reserva de memoria por iteracion),
+# asi que subir el techo solo alarga el tiempo de pared hasta el objetivo, que es
+# justamente lo que se busca.
+MAX_POWER_ITERS = 500000
 # Divergencia tolerada entre el tiempo por iteracion de la fase de aislamiento y el
 # de la fase de potencia. Superarla no invalida el dato, pero avisa de que el estado
 # del dispositivo (turbo, cache, relojes) no fue estable entre ambas fases.
@@ -490,14 +511,30 @@ def parse_fft_layouts(raw):
     return values
 
 
-def parse_fft_shapes(raw, dims):
+def parse_fft_shapes(raw, dims, min_n=None):
+    """Traduce la especificacion de tamanos FFT a una lista de formas (nx, ny, nz).
+
+    Args:
+        raw: Lista explicita ("512,1024" o "64x64,128x128") o la palabra "auto"
+            para usar la rejilla de octavas de generate_size_sweep().
+        dims: Dimensionalidad de la transformada (1, 2 o 3).
+        min_n: Piso opcional del barrido, solo efectivo para 1D con "auto". Permite
+            generar unicamente el tramo de tamanos pequenos que falte, sin repetir
+            el rango ya medido.
+
+    Returns:
+        list: Formas (nx, ny, nz) a ejecutar.
+    """
     if not raw.strip():
         return []
     raw_lower = raw.strip().lower()
     if raw_lower in ("auto", "octave", "default"):
         db_mgr_mod = _get_data_bank_manager_module()
         algo_name = f"fft_{dims}d" if dims in (2, 3) else "fft_1d"
-        sizes = db_mgr_mod.generate_size_sweep(algorithm=algo_name)
+        if dims == 1 and min_n is not None:
+            sizes = db_mgr_mod.generate_size_sweep(algorithm=algo_name, min_n=min_n)
+        else:
+            sizes = db_mgr_mod.generate_size_sweep(algorithm=algo_name)
         if dims == 1:
             return [(n, 0, 0) for n in sizes]
         elif dims == 2:
@@ -550,23 +587,86 @@ def fft_sum_log2(dims):
     return sum(math.log2(d) for d in dims)
 
 
-def fft_radix_class(dims):
-    def is_pow2(n):
+def max_prime_factor(n: int) -> int:
+    """Devuelve el mayor factor primo de n (1 para n <= 1).
+
+    Es el descriptor que gobierna que algoritmo elige FFTW/cuFFT: si todos los
+    factores tienen codelet nativo la transformada corre a velocidad plena; si
+    aparece un primo sin codelet hay que caer a Rader/Bluestein, que convierte la
+    transformada de longitud p en uno o varios pasos auxiliares mas largos.
+
+    Args:
+        n: Entero positivo a factorizar.
+
+    Returns:
+        int: El mayor factor primo de n, o 1 si n <= 1.
+    """
+    if n <= 1:
+        return 1
+    mayor = 1
+    # Division por tentativa: basta hasta sqrt(n) porque tras extraer todos los
+    # factores pequenos el resto, si es > 1, es necesariamente primo.
+    d = 2
+    while d * d <= n:
+        while n % d == 0:
+            mayor = d
+            n //= d
+        d += 1 if d == 2 else 2
+    return max(mayor, n)
+
+
+def fft_max_prime_factor(dims: Sequence[int]) -> int:
+    """Mayor factor primo presente en cualquiera de las dimensiones de la FFT.
+
+    En FFT multidimensional la transformada se descompone por ejes, asi que basta
+    con que UN eje tenga un primo hostil para pagar la penalizacion en ese eje.
+    Por eso se toma el maximo sobre las dimensiones y no el producto.
+
+    Args:
+        dims: Dimensiones de la transformada (1, 2 o 3 elementos).
+
+    Returns:
+        int: El mayor factor primo entre todas las dimensiones.
+    """
+    return max((max_prime_factor(int(d)) for d in dims), default=1)
+
+
+# Cortes de clase calibrados contra el barrido FFT de paccaA100 (25.184 filas,
+# job 6924). El rendimiento de CPU relativo a un tamano 5-smooth de la misma
+# octava cae de forma monotona con el mayor factor primo:
+#     mayor primo <= 13   -> 1.00  (FFTW tiene codelet nativo: 2,3,5,7,11,13)
+#     mayor primo 17..31  -> 0.84  (radix generico)
+#     mayor primo 37..127 -> 0.49  (Rader/Bluestein)
+#     mayor primo > 127   -> 0.15
+# En GPU el mismo barrido da 0.98-1.03 en todas las clases: cuFFT es practicamente
+# insensible. Esa asimetria es justamente la senal que el agente necesita para
+# decidir CPU vs GPU, y por eso se exporta al CSV.
+RADIX_CODELET_MAX = 13   # primos con codelet nativo en FFTW
+RADIX_GENERIC_MAX = 31   # radix generico, penalizacion moderada
+
+
+def fft_radix_class(dims: Sequence[int]) -> str:
+    """Clasifica una forma de FFT segun lo amigable que resulta para la libreria.
+
+    Args:
+        dims: Dimensiones de la transformada (1, 2 o 3 elementos).
+
+    Returns:
+        str: Una de "pow2", "codelet", "radix_gen" o "bluestein", en orden
+            creciente de penalizacion esperada en CPU.
+    """
+    def is_pow2(n: int) -> bool:
         return n > 0 and (n & (n - 1)) == 0
 
-    def is_smooth_235(n):
-        if n <= 0:
-            return False
-        for p in (2, 3, 5):
-            while n % p == 0:
-                n //= p
-        return n == 1
-
-    if all(is_pow2(d) for d in dims):
+    if all(is_pow2(int(d)) for d in dims):
         return "pow2"
-    if all(is_smooth_235(d) for d in dims):
-        return "smooth235"
-    return "other"
+
+    mayor = fft_max_prime_factor(dims)
+    if mayor <= RADIX_CODELET_MAX:
+        return "codelet"
+    if mayor <= RADIX_GENERIC_MAX:
+        return "radix_gen"
+    return "bluestein"
 
 
 def fft_payload_bytes(dims, batch, precision, domain, layout):
@@ -1411,7 +1511,7 @@ def run_single_case(
 
         # El lazo se dimensiona para durar POWER_WINDOW_TARGET_SEC: una ventana corta
         # deja demasiado pocas muestras de NVML/RAPL para integrar la energia con rigor.
-        power_iters = min(20000, max(1, round(POWER_WINDOW_TARGET_SEC / time_sec)))
+        power_iters = min(MAX_POWER_ITERS, max(1, round(POWER_WINDOW_TARGET_SEC / time_sec)))
         cmd_pwr = list(cmd)
         try:
             iters_idx = cmd_pwr.index("--iters")
@@ -1546,7 +1646,7 @@ def run_single_case_fft(
     # 3. Power Monitoring Execution (Segunda ejecucion con monitor activo)
     # El lazo se dimensiona para durar POWER_WINDOW_TARGET_SEC: una ventana corta deja
     # demasiado pocas muestras de NVML/RAPL para integrar la energia con rigor.
-    power_iters = min(20000, max(1, round(POWER_WINDOW_TARGET_SEC / time_sec)))
+    power_iters = min(MAX_POWER_ITERS, max(1, round(POWER_WINDOW_TARGET_SEC / time_sec)))
     cmd_pwr = list(cmd)
     if len(cmd_pwr) > 10:
         cmd_pwr[10] = str(power_iters)
@@ -1834,7 +1934,7 @@ def run_fft(args):
     if args.mode == "continuous-rl":
         shapes = []
         if args.fft_sizes_1d and args.fft_sizes_1d.strip():
-            shapes.extend(parse_fft_shapes(args.fft_sizes_1d, 1))
+            shapes.extend(parse_fft_shapes(args.fft_sizes_1d, 1, min_n=args.fft_min_n))
         if args.fft_sizes_2d and args.fft_sizes_2d.strip():
             shapes.extend(parse_fft_shapes(args.fft_sizes_2d, 2))
         if args.fft_sizes_3d and args.fft_sizes_3d.strip():
@@ -1852,7 +1952,7 @@ def run_fft(args):
             sizes = generator.generate()
             shapes = [(n, 0, 0) for n in sizes]
     else:
-        sizes_1d = parse_fft_shapes(args.fft_sizes_1d, 1)
+        sizes_1d = parse_fft_shapes(args.fft_sizes_1d, 1, min_n=args.fft_min_n)
         sizes_2d = parse_fft_shapes(args.fft_sizes_2d, 2)
         sizes_3d = parse_fft_shapes(args.fft_sizes_3d, 3)
         shapes = sizes_1d + sizes_2d + sizes_3d
@@ -1892,6 +1992,11 @@ def run_fft(args):
             "Domain",
             "Direction",
             "Layout",
+            # Descriptores de estructura de la transformada. Son derivables de
+            # Nx/Ny/Nz, pero se materializan para que el analisis y el codificador
+            # del agente no tengan que refactorizar cada tamano por su cuenta.
+            "Radix_Class",
+            "Max_Prime_Factor",
         ]
         if args.repetitions > 1:
             fieldnames.append("Iteration")
@@ -2026,6 +2131,12 @@ def run_fft(args):
 
                                 row = {key: result.get(key, 0.0) for key in fieldnames if key not in ["Device", "Iteration"]}
                                 row["Device"] = device
+                                # Se calculan aqui y no en run_single_case_fft porque dependen
+                                # solo de la forma, no de la medicion: asi la columna queda
+                                # definida incluso si cambia la ruta de telemetria.
+                                dims_caso = fft_dims(nx, ny, nz)
+                                row["Radix_Class"] = fft_radix_class(dims_caso)
+                                row["Max_Prime_Factor"] = fft_max_prime_factor(dims_caso)
                                 if args.repetitions > 1:
                                     row["Iteration"] = rep
                                 writer.writerow(row)
@@ -2109,7 +2220,12 @@ def main():
         "--fft-min-n",
         type=int,
         default=4096,
-        help="Limite inferior para FFT en modo continuous-rl (por defecto: 4096)",
+        help=(
+            "Limite inferior de N para FFT: gobierna tanto el banco de datos en modo "
+            "continuous-rl como el piso de la rejilla automatica 1D (--fft-sizes-1d auto). "
+            "Por defecto 4096, el rango historico; bajarlo permite medir solo el tramo de "
+            "tamanos pequenos que falte, sin repetir lo ya recolectado."
+        ),
     )
     parser.add_argument(
         "--fft-max-n",

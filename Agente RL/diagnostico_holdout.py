@@ -16,6 +16,7 @@ una frontera de decision en funcion de las features, o si memorizo filas
 exactas del CSV.
 """
 
+import argparse
 import os
 import sys
 
@@ -73,10 +74,17 @@ def medir_precision_split(
     return (aciertos / total if total > 0 else 0.0), total
 
 
-def ejecutar_diagnostico() -> None:
-    """Entrena el modelo de holdout y reporta la precision train vs. holdout."""
+def ejecutar_diagnostico(dataset: str | None = None) -> None:
+    """Entrena el modelo de holdout y reporta la precision train vs. holdout.
+
+    Args:
+        dataset: Ruta al CSV codificado a usar tanto para entrenar como para medir
+            precisión. Debe ser el MISMO en ambos pasos, o la comparación train vs.
+            holdout queda contaminada por un cambio de distribución. Si es None,
+            usa Entorno/dataset_pacca.csv (comportamiento previo, GEMM-only).
+    """
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    csv_path = os.path.join(base_dir, "Entorno", "dataset_pacca.csv")
+    csv_path = dataset if dataset else os.path.join(base_dir, "Entorno", "dataset_pacca.csv")
 
     print(f"--- Entrenando modelo de diagnostico (holdout={HOLDOUT_FRACTION:.0%}) ---")
     modelo_path = entrenar_agente(
@@ -84,6 +92,7 @@ def ejecutar_diagnostico() -> None:
         split="train",
         modelo_nombre="modelo_dqn_scheduler_holdout_check",
         log_subdir="holdout_check",
+        dataset=csv_path,
     )
 
     print("\n--- Midiendo precision por split ---")
@@ -98,4 +107,11 @@ def ejecutar_diagnostico() -> None:
 
 
 if __name__ == "__main__":
-    ejecutar_diagnostico()
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--dataset", type=str, default=None,
+        help="Ruta al CSV codificado a usar para entrenar Y medir precisión "
+             "(debe ser el mismo en ambos pasos). Por defecto: Entorno/dataset_pacca.csv.",
+    )
+    args = parser.parse_args()
+    ejecutar_diagnostico(dataset=args.dataset)

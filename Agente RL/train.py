@@ -43,6 +43,7 @@ def entrenar_agente(
     log_subdir: str | None = None,
     seed: int = BENCH_SEED,
     timesteps: int = 100000,
+    dataset: str | None = None,
 ) -> str:
     """
     Instancia el entorno PlanificadorEnv y entrena un agente DQN
@@ -64,6 +65,10 @@ def entrenar_agente(
             entre corridas independientes. El split del dataset NO usa esta semilla:
             queda fijo en BENCH_SEED para que todas las corridas vean los mismos datos.
         timesteps: Pasos de entrenamiento del ciclo `learn()`.
+        dataset: Ruta al CSV codificado a usar. Si es None (default), usa
+            Entorno/dataset_rl_fft.csv (comportamiento vigente para la prueba
+            FFT-only). Cualquier script que evalúe el modelo resultante debe
+            usar este MISMO CSV, o la observación no coincidirá con lo aprendido.
 
     Returns:
         str: Ruta absoluta del modelo guardado (sin extensión .zip).
@@ -72,7 +77,7 @@ def entrenar_agente(
 
     # 1. Definir rutas relativas al proyecto
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    csv_path = os.path.join(base_dir, "Entorno", "dataset_pacca.csv")
+    csv_path = dataset if dataset else os.path.join(base_dir, "Entorno", "dataset_rl_fft.csv")
     log_dir = os.path.join(base_dir, "logs_entrenamiento", log_subdir) if log_subdir else os.path.join(base_dir, "logs_entrenamiento")
     modelo_path = os.path.join(base_dir, modelo_nombre)
 
@@ -128,7 +133,7 @@ def entrenar_agente(
     accion, _ = modelo.predict(obs, deterministic=True)
 
     dispositivo_str = "CPU" if accion == 0 else "GPU"
-    print(f"Estado recibido (Características 22D):")
+    print(f"Estado recibido (Características {env_base.observation_space.shape[0]}D):")
     print(obs)
     print(f"Decisión del Scheduler para esta tarea: {dispositivo_str}")
 

@@ -149,7 +149,7 @@ def calcular_referencias(cola: list[dict]) -> dict[str, dict[str, float]]:
 
 
 def entrenar_barrido(
-    semillas: list[int], timesteps: int, base_dir: str, reusar: bool
+    semillas: list[int], timesteps: int, base_dir: str, reusar: bool, dataset: str | None = None
 ) -> dict[int, str]:
     """Entrena un agente independiente por cada semilla.
 
@@ -159,6 +159,10 @@ def entrenar_barrido(
         base_dir: Directorio raíz del módulo Agente RL.
         reusar: Si es True, omite el entrenamiento de las semillas cuyo modelo
             .zip ya exista en disco (útil para re-generar solo las gráficas).
+        dataset: Ruta al CSV codificado a usar para entrenar TODAS las semillas.
+            Debe ser el mismo que luego se pase a construir_cola_evaluacion(), o
+            la comparación entre semillas queda evaluada sobre una distribución
+            distinta a la de entrenamiento.
 
     Returns:
         dict[int, str]: Semilla -> ruta del modelo entrenado (sin extensión).
@@ -182,6 +186,7 @@ def entrenar_barrido(
                 log_subdir=os.path.join(SUBDIR_LOGS, f"seed_{semilla}"),
                 seed=semilla,
                 timesteps=timesteps,
+                dataset=dataset,
             )
         except Exception as exc:  # noqa: BLE001 - una corrida fallida no debe abortar el barrido
             print(f"[ERROR] La corrida con semilla {semilla} falló y se omite: {exc}")
@@ -450,7 +455,9 @@ def graficar_convergencia_multisemilla(base_dir: str, semillas: list[int], img_s
     print(f"[ÉXITO] Gráfica de convergencia multi-semilla guardada en: {img_salida}")
 
 
-def ejecutar_barrido(semillas: list[int], timesteps: int, num_muestras: int, reusar: bool) -> None:
+def ejecutar_barrido(
+    semillas: list[int], timesteps: int, num_muestras: int, reusar: bool, dataset: str | None = None
+) -> None:
     """Orquesta el barrido completo: entrenamiento, evaluación, CSV y gráficas.
 
     Args:
@@ -460,12 +467,12 @@ def ejecutar_barrido(semillas: list[int], timesteps: int, num_muestras: int, reu
         reusar: Reutiliza modelos ya entrenados en disco en lugar de re-entrenar.
     """
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    csv_path = os.path.join(base_dir, "Entorno", "dataset_pacca.csv")
+    csv_path = dataset if dataset else os.path.join(base_dir, "Entorno", "dataset_pacca.csv")
 
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"No se encontró el dataset en: {csv_path}")
 
-    modelos = entrenar_barrido(semillas, timesteps, base_dir, reusar)
+    modelos = entrenar_barrido(semillas, timesteps, base_dir, reusar, dataset=csv_path)
     if not modelos:
         print("[ERROR] Ninguna corrida produjo un modelo; se aborta el reporte.")
         return
@@ -506,6 +513,11 @@ if __name__ == "__main__":
     parser.add_argument("-n", "--muestras", type=int, default=200, help="Tareas de la carga de evaluación")
     parser.add_argument("--semillas", type=int, nargs="+", default=SEMILLAS, help="Semillas del DQN a entrenar")
     parser.add_argument("--reusar", action="store_true", help="Reutiliza modelos ya entrenados (solo re-genera reporte)")
+    parser.add_argument(
+        "--dataset", type=str, default=None,
+        help="Ruta al CSV codificado a usar para entrenar Y evaluar TODAS las semillas "
+             "(debe ser el mismo en ambos pasos). Por defecto: Entorno/dataset_pacca.csv.",
+    )
     args = parser.parse_args()
 
-    ejecutar_barrido(args.semillas, args.timesteps, args.muestras, args.reusar)
+    ejecutar_barrido(args.semillas, args.timesteps, args.muestras, args.reusar, dataset=args.dataset)
