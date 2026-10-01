@@ -66,8 +66,10 @@ def entrenar_agente(
             queda fijo en BENCH_SEED para que todas las corridas vean los mismos datos.
         timesteps: Pasos de entrenamiento del ciclo `learn()`.
         dataset: Ruta al CSV codificado a usar. Si es None (default), usa
-            Entorno/dataset_rl_fft.csv (comportamiento vigente para la prueba
-            FFT-only). Cualquier script que evalúe el modelo resultante debe
+            Entorno/dataset_rl.csv: GEMM + FFT de la campaña principal (FFT 1D
+            con N >= 4096). La campaña FFT 1D de tamaños pequeños queda fuera
+            porque se midió en otro trabajo con un desfase de potencia frente a
+            la principal. Cualquier script que evalúe el modelo resultante debe
             usar este MISMO CSV, o la observación no coincidirá con lo aprendido.
 
     Returns:
@@ -77,7 +79,7 @@ def entrenar_agente(
 
     # 1. Definir rutas relativas al proyecto
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    csv_path = dataset if dataset else os.path.join(base_dir, "Entorno", "dataset_rl_fft.csv")
+    csv_path = dataset if dataset else os.path.join(base_dir, "Entorno", "dataset_rl.csv")
     log_dir = os.path.join(base_dir, "logs_entrenamiento", log_subdir) if log_subdir else os.path.join(base_dir, "logs_entrenamiento")
     modelo_path = os.path.join(base_dir, modelo_nombre)
 

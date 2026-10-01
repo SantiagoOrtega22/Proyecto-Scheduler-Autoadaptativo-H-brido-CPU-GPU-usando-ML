@@ -32,6 +32,8 @@ def generar_grafica_comparativa(
     titulo: str,
     img_salida: str,
     resaltar: str | None = None,
+    formatos: tuple[str, str, str] = ('{:.3f}', '{:.2f}', '{:.2f}'),
+    escala_fuente: float = 1.0,
 ) -> None:
     """Genera una figura de 3 paneles (Tiempo, Energía, EDP) para un subconjunto de políticas.
 
@@ -41,41 +43,50 @@ def generar_grafica_comparativa(
         colores: Un color por cada entrada de `claves`, mismo orden.
         titulo: Título general de la figura.
         img_salida: Ruta de archivo donde guardar el PNG.
-        resaltar: Nombre de la política a resaltar con borde marcado (p. ej. 'Agente RL'), o None.
+        resaltar: Nombre de la política a resaltar con borde marcado (p. ej. 'RL Agent'), o None.
+        formatos: Formato de etiqueta (tiempo, energía, EDP), en ese orden.
+        escala_fuente: Multiplicador aplicado a todos los tamaños de fuente/línea
+            de la figura (subir para que se lea mejor a distancia de póster).
     """
     tiempos = [resultados[k]['t'] for k in claves]
     energias = [resultados[k]['e'] for k in claves]
     edps = [resultados[k]['edp'] for k in claves]
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 7))
-    fig.suptitle(titulo, fontsize=18, fontweight='bold', color=COLOR_TEXTO_PRIMARIO)
+    # Tamaño y tipografía siguiendo la misma estructura que las gráficas de
+    # graficas_poster/ (figuras grandes, fuentes ~2x el tamaño de pantalla
+    # para que se lean a distancia de póster impreso).
+    fig, axes = plt.subplots(1, 3, figsize=(21 * escala_fuente ** 0.3, 9 * escala_fuente ** 0.3), dpi=300)
+    fig.suptitle(titulo, fontsize=28 * escala_fuente, fontweight='bold', color=COLOR_TEXTO_PRIMARIO, y=1.02)
 
     datos_por_panel = [
-        (axes[0], tiempos, 'Tiempo Total de Ejecución', 'Segundos', '{:.1f}'),
-        (axes[1], energias, 'Consumo de Energía Acumulado', 'Joules', '{:.0f}'),
-        (axes[2], edps, 'Producto Energía-Retraso (EDP)', 'Magnitud EDP', '{:.0f}'),
+        (axes[0], tiempos, 'Total Execution Time', 'Seconds', formatos[0]),
+        (axes[1], energias, 'Accumulated Energy Consumption', 'Joules', formatos[1]),
+        (axes[2], edps, 'Energy-Delay Product (EDP)', 'EDP Magnitude', formatos[2]),
     ]
 
     for ax, valores, subtitulo, etiqueta_y, formato in datos_por_panel:
         # Borde de superficie (en vez de negro puro) entre barras adyacentes:
         # separa los rellenos pastel sin el contraste duro de un borde negro.
-        barras = ax.bar(claves, valores, color=colores, edgecolor=COLOR_SUPERFICIE, linewidth=1.5, width=0.65)
+        barras = ax.bar(claves, valores, color=colores, edgecolor=COLOR_SUPERFICIE,
+                         linewidth=2.2 * escala_fuente, width=0.65)
         if resaltar is not None:
             # Resalta la barra indicada (p. ej. Agente RL, el resultado central de la tesis)
             # con un borde marcado para que destaque frente a las demás.
             resaltar_barra(barras, claves.index(resaltar))
-        etiquetar_barras(ax, barras, formato)
+        etiquetar_barras(ax, barras, formato, fontsize=round(16 * escala_fuente), offset_puntos=round(8 * escala_fuente))
 
-        ax.set_title(subtitulo, fontsize=12)
-        ax.set_ylabel(etiqueta_y, fontsize=11)
-        ax.set_ylim(top=max(valores) * 1.15)  # margen para que las etiquetas no choquen con el título
+        ax.set_title(subtitulo, fontsize=21 * escala_fuente, fontweight='bold', pad=14 * escala_fuente)
+        ax.set_ylabel(etiqueta_y, fontsize=19 * escala_fuente, labelpad=10 * escala_fuente)
+        ax.set_ylim(top=max(valores) * 1.18)  # margen para que las etiquetas no choquen con el título
         limpiar_bordes(ax)
+        ax.tick_params(axis='both', which='major', labelsize=16 * escala_fuente,
+                        length=7 * escala_fuente, width=1.3 * escala_fuente)
         ax.tick_params(axis='x', rotation=45)
         for tick in ax.get_xticklabels():
             tick.set_ha('right')
 
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    plt.savefig(img_salida, dpi=300)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.93])
+    plt.savefig(img_salida, dpi=300, bbox_inches='tight')
     print(f"[ÉXITO] Gráfica generada en: {img_salida}")
 
 def evaluar_comparativa_extendida(num_muestras: int = 200, dataset: str | None = None):
@@ -83,9 +94,13 @@ def evaluar_comparativa_extendida(num_muestras: int = 200, dataset: str | None =
     modelo_path = os.path.join(base_dir, "modelo_dqn_scheduler.zip")
     # Debe apuntar al MISMO dataset con el que se entrenó modelo_dqn_scheduler.zip
     # (el nombre de archivo no queda registrado dentro del .zip). Por defecto se
-    # asume dataset_pacca.csv por compatibilidad con corridas previas; para
-    # evaluar una prueba FFT-only o el dataset mixto, pasar --dataset.
-    csv_path = dataset if dataset else os.path.join(base_dir, "Entorno", "dataset_pacca.csv")
+    # asume dataset_rl.csv, el mismo default que usa train.py (GEMM + FFT de la
+    # campaña principal, sin la campaña FFT 1D de tamaños pequeños) y con el
+    # esquema de 23 columnas de observación (incluye Radix_log2) que espera la
+    # versión actual de gym.py; dataset_pacca.csv es un esquema viejo (22
+    # columnas, sin Radix_log2) y ya no es compatible. Para evaluar otro dataset
+    # (p. ej. una prueba FFT-only), pasar --dataset.
+    csv_path = dataset if dataset else os.path.join(base_dir, "Entorno", "dataset_rl.csv")
     img_salida_dispositivos = os.path.join(base_dir, "grafica_comparativa_dispositivos.png")
     img_salida_heuristicas = os.path.join(base_dir, "grafica_comparativa_heuristicas.png")
     csv_salida = os.path.join(base_dir, "tabla_comparativa_tesis.csv")
@@ -104,13 +119,13 @@ def evaluar_comparativa_extendida(num_muestras: int = 200, dataset: str | None =
     
     # Estructura para almacenar resultados de las 7 políticas
     resultados = {
-        'Solo CPU': {'t': 0.0, 'e': 0.0, 'edp': 0.0},
-        'Solo GPU': {'t': 0.0, 'e': 0.0, 'edp': 0.0},
+        'CPU Only': {'t': 0.0, 'e': 0.0, 'edp': 0.0},
+        'GPU Only': {'t': 0.0, 'e': 0.0, 'edp': 0.0},
         'MET': {'t': 0.0, 'e': 0.0, 'edp': 0.0},
         'MCT': {'t': 0.0, 'e': 0.0, 'edp': 0.0},
         'Min-Min': {'t': 0.0, 'e': 0.0, 'edp': 0.0},
         'Max-Min': {'t': 0.0, 'e': 0.0, 'edp': 0.0},
-        'Agente RL': {'t': 0.0, 'e': 0.0, 'edp': 0.0}
+        'RL Agent': {'t': 0.0, 'e': 0.0, 'edp': 0.0}
     }
 
     print("Simulando heurísticas estáticas y Agente RL...\n")
@@ -128,15 +143,15 @@ def evaluar_comparativa_extendida(num_muestras: int = 200, dataset: str | None =
     for tarea in cola_simulacion:
         m_cpu, m_gpu = tarea["metricas"][0], tarea["metricas"][1]
 
-        resultados['Solo CPU']['t'] += m_cpu["tiempo"]
-        resultados['Solo CPU']['e'] += m_cpu["energia"]
+        resultados['CPU Only']['t'] += m_cpu["tiempo"]
+        resultados['CPU Only']['e'] += m_cpu["energia"]
 
-        resultados['Solo GPU']['t'] += m_gpu["tiempo"]
-        resultados['Solo GPU']['e'] += m_gpu["energia"]
+        resultados['GPU Only']['t'] += m_gpu["tiempo"]
+        resultados['GPU Only']['e'] += m_gpu["energia"]
     # EDP de sistema = Energia_total * Tiempo_total (no la suma de EDP por tarea: el EDP
     # no es aditivo, ver nota en MCT).
-    resultados['Solo CPU']['edp'] = resultados['Solo CPU']['e'] * resultados['Solo CPU']['t']
-    resultados['Solo GPU']['edp'] = resultados['Solo GPU']['e'] * resultados['Solo GPU']['t']
+    resultados['CPU Only']['edp'] = resultados['CPU Only']['e'] * resultados['CPU Only']['t']
+    resultados['GPU Only']['edp'] = resultados['GPU Only']['e'] * resultados['GPU Only']['t']
 
     # 3. MET (Minimum Execution Time) - Greedy puro de tiempo (decide por tarea, sin
     # conocimiento de la cola), pero igual reparte trabajo entre CPU y GPU en paralelo:
@@ -234,18 +249,18 @@ def evaluar_comparativa_extendida(num_muestras: int = 200, dataset: str | None =
             libre_cpu += m_elegida["tiempo"]
         else:
             libre_gpu += m_elegida["tiempo"]
-        resultados['Agente RL']['e'] += m_elegida["energia"]
-    resultados['Agente RL']['t'] = max(libre_cpu, libre_gpu)
-    resultados['Agente RL']['edp'] = resultados['Agente RL']['e'] * resultados['Agente RL']['t']
+        resultados['RL Agent']['e'] += m_elegida["energia"]
+    resultados['RL Agent']['t'] = max(libre_cpu, libre_gpu)
+    resultados['RL Agent']['edp'] = resultados['RL Agent']['e'] * resultados['RL Agent']['t']
 
     # ==========================================
     # GENERACIÓN DE TABLA CSV
     # ==========================================
     with open(csv_salida, mode='w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
-        writer.writerow(["Politica", "Tiempo Total (s)", "Energia Total (J)", "EDP Acumulado", "Ahorro vs Solo CPU (%)"])
+        writer.writerow(["Policy", "Total Time (s)", "Total Energy (J)", "Accumulated EDP", "Savings vs CPU Only (%)"])
         
-        ref_edp = resultados['Solo CPU']['edp']
+        ref_edp = resultados['CPU Only']['edp']
         for pol, vals in resultados.items():
             ahorro_vs_cpu = (1 - vals['edp'] / ref_edp) * 100 if ref_edp > 0 else 0.0
             writer.writerow([
@@ -264,20 +279,22 @@ def evaluar_comparativa_extendida(num_muestras: int = 200, dataset: str | None =
 
     generar_grafica_comparativa(
         resultados,
-        claves=['Solo CPU', 'Solo GPU', 'Agente RL'],
+        claves=['CPU Only', 'GPU Only', 'RL Agent'],
         colores=[COLOR_CPU, COLOR_GPU, COLOR_ACENTO_RL],
-        titulo='Referencia de Dispositivo Único vs. Agente RL',
+        titulo='Single-Device Baseline vs. RL Agent',
         img_salida=img_salida_dispositivos,
-        resaltar='Agente RL',
+        resaltar='RL Agent',
     )
 
     generar_grafica_comparativa(
         resultados,
-        claves=['MET', 'MCT', 'Min-Min', 'Max-Min', 'Agente RL'],
+        claves=['MET', 'MCT', 'Min-Min', 'Max-Min', 'RL Agent'],
         colores=PALETA_CATEGORICA[:5],
-        titulo='Heurísticas Clásicas vs. Scheduler RL',
+        titulo='Classical Heuristics vs. RL Scheduler',
         img_salida=img_salida_heuristicas,
-        resaltar='Agente RL',
+        resaltar='RL Agent',
+        formatos=('{:.1f}', '{:.0f}', '{:.0f}'),
+        escala_fuente=1.35,
     )
 
     print("\n¡Simulación completada! Revisa los archivos .png y .csv.")
@@ -289,7 +306,7 @@ if __name__ == "__main__":
         "--dataset", type=str, default=None,
         help="Ruta al CSV codificado (salida de codificador_csv.py) a evaluar. "
              "Debe coincidir con el dataset usado para entrenar modelo_dqn_scheduler.zip. "
-             "Por defecto: Entorno/dataset_pacca.csv.",
+             "Por defecto: Entorno/dataset_rl.csv.",
     )
     args = parser.parse_args()
     evaluar_comparativa_extendida(num_muestras=args.muestras, dataset=args.dataset)

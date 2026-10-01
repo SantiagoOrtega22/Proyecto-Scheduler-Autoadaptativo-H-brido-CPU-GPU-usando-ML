@@ -97,7 +97,13 @@ def limpiar_bordes(ax: plt.Axes) -> None:
     ax.spines["bottom"].set_color(COLOR_EJE)
 
 
-def etiquetar_barras(ax: plt.Axes, barras: BarContainer, formato: str = "{:.1f}") -> None:
+def etiquetar_barras(
+    ax: plt.Axes,
+    barras: BarContainer,
+    formato: str = "{:.1f}",
+    fontsize: int = 9,
+    offset_puntos: int = 4,
+) -> None:
     """Escribe el valor de cada barra sobre su extremo (etiquetado directo).
 
     Sirve tambien como mitigacion de accesibilidad: varios tonos de la
@@ -109,17 +115,19 @@ def etiquetar_barras(ax: plt.Axes, barras: BarContainer, formato: str = "{:.1f}"
         ax: Eje sobre el que estan dibujadas las barras.
         barras: Contenedor devuelto por `ax.bar(...)`.
         formato: Formato de texto para el valor (`str.format`).
+        fontsize: Tamaño de fuente de la etiqueta (subir para figuras de poster).
+        offset_puntos: Separacion vertical entre la barra y la etiqueta, en puntos.
     """
     for barra in barras:
         altura = barra.get_height()
         ax.annotate(
             formato.format(altura),
             xy=(barra.get_x() + barra.get_width() / 2, altura),
-            xytext=(0, 4),
+            xytext=(0, offset_puntos),
             textcoords="offset points",
             ha="center",
             va="bottom",
-            fontsize=9,
+            fontsize=fontsize,
             color=COLOR_TEXTO_SECUNDARIO,
         )
 
