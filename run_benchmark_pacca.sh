@@ -78,11 +78,38 @@ echo "=================== EJECUCIÓN FFT ===================="
     #--fft-sizes-1d auto \
     #--fft-sizes-2d auto \
     #--fft-sizes-3d auto
-python3 -u benchmark_runner.py --benchmark fft --device both \
-    --fft-sizes-1d auto --fft-min-n 64 --fft-max-n 4095 \
-    --fft-sizes-2d " " --fft-sizes-3d " " \
+#python3 -u benchmark_runner.py --benchmark fft --device both \
+#    --fft-sizes-1d auto --fft-min-n 64 --fft-max-n 4095 \
+#    --fft-sizes-2d " " --fft-sizes-3d " " \
+#    --power-window-sec 0.5 --idle-measure-sec 3 \
+#    --output fft_1d_pequenos.csv
+
+echo "============ VALIDACION CONTADOR DE ENERGIA NVML ============"
+# Prueba corta para validar --gpu-energy-source counter frente al muestreo de potencia
+# legado. Los tamanos son los que mostraron mas dispersion de Pavg en GPU en el job 7833:
+#   N=288 (gana CPU), N=1216 (frontera: el ganador en EDP cambiaba segun OpA/OpB) y
+#   N=2240 (gana GPU). Con 5 repeticiones por caso se puede estimar la varianza.
+# Criterio: el CV de Avg_Power_W de GPU entre repeticiones debe bajar de 15-27 % a unos
+#   pocos puntos, y en N=1216 S el ganador en EDP no debe depender de OpA/OpB.
+
+# A) Metodo nuevo (contador acumulado NVML), CPU y GPU.
+python3 -u benchmark_runner.py --benchmark gemm --device both \
+    --sizes 288,1216,2240 --precisions S,D,Z \
+    --sweep-transpose --op-a-list N,T --op-b-list N,T \
+    --repetitions 5 \
     --power-window-sec 0.5 --idle-measure-sec 3 \
-    --output fft_1d_pequenos.csv
+    --gpu-energy-source counter \
+    --output validacion_gpu_counter.csv
+
+# B) Metodo legado (muestreo de potencia), solo GPU, mismos casos: sirve de comparacion
+#    directa en el mismo nodo y en el mismo job.
+python3 -u benchmark_runner.py --benchmark gemm --device gpu \
+    --sizes 288,1216,2240 --precisions S,D,Z \
+    --sweep-transpose --op-a-list N,T --op-b-list N,T \
+    --repetitions 5 \
+    --power-window-sec 0.5 --idle-measure-sec 3 \
+    --gpu-energy-source power \
+    --output validacion_gpu_power.csv
 
 echo "================================================================="
 echo "Finalizado con éxito a las: $(date)"

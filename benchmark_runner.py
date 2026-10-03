@@ -54,12 +54,16 @@ Interpretacion:
     EDP             -> Producto Energía-Retardo (Energy-Delay Product = Energy_J * Time_sec).
     Loop_Window_sec -> Duración real de la ventana sobre la que se integró la telemetría.
     Iters_K         -> Iteraciones ejecutadas dentro de esa ventana.
-    Power_Samples   -> Muestras crudas de RAPL/NVML que cayeron dentro de la ventana.
+    Power_Samples   -> Muestras de telemetría dentro de la ventana. Con contador NVML son
+                       las ACTUALIZACIONES distintas del contador (no las lecturas).
     Idle_Power_W    -> Línea base en reposo descontada para obtener la potencia activa.
     Wall_Elapsed_sec-> Duración total del subproceso (incluye setup y cierre; solo auditoría).
+    Energy_Source   -> Método de telemetría de la fila: "rapl_counter" (CPU),
+                       "nvml_counter" (GPU, por defecto) o "nvml_power" (GPU, legado).
 
-Las cinco últimas columnas existen para poder auditar a posteriori que la energía se
-integró sobre el lazo y no sobre el proceso completo.
+Las columnas de auditoría existen para poder verificar a posteriori que la energía se
+integró sobre el lazo y no sobre el proceso completo. Energy_Source evita mezclar en un
+mismo análisis filas de GPU medidas con métodos distintos.
 
 Solo FFT, descriptores de estructura de la transformada:
     Max_Prime_Factor -> Mayor factor primo entre Nx, Ny y Nz.
@@ -87,8 +91,13 @@ NOTAS HPC Y RIGOR
       es simétrico entre dispositivos para que la comparación CPU/GPU sea justa.
     - Coherencia interna: por construcción Energy_J = Avg_Power_W * Time_sec y
       EDP = Energy_J * Time_sec, con Time_sec proveniente de la fase sin telemetría.
-    - Consumo en GPU: muestreo continuo de nvmlDeviceGetPowerUsage() e integración
-      trapezoidal de la curva de potencia recortada a la ventana del lazo.
+    - Consumo en GPU (--gpu-energy-source counter, por defecto): muestreo continuo del
+      contador acumulado nvmlDeviceGetTotalEnergyConsumption() (mJ, Volta+), tratado
+      igual que RAPL: se interpola el contador en ambos bordes de la ventana y se resta.
+      Se descartó nvmlDeviceGetPowerUsage() como fuente principal porque en A100 devuelve
+      un promedio móvil de ~1 s: con ventanas de 0.5 s medía sobre todo la rampa de
+      subida y producía hasta 2.5x de dispersión de potencia entre configuraciones con
+      el mismo tiempo. El método legado sigue disponible con --gpu-energy-source power.
     - Consumo en CPU: muestreo continuo de los contadores acumulados Intel RAPL
       (/sys/class/powercap, todos los sockets package), interpolando el contador en
       ambos bordes de la ventana y tomando la diferencia.
@@ -347,6 +356,15 @@ POWER_SAMPLE_INTERVAL_SEC = 0.02
 # multiplicaria por cinco las lecturas de sysfs, perturbando la propia medicion, y no
 # puede superar la granularidad de 1 ms del contador.
 RAPL_SAMPLE_INTERVAL_SEC = 0.005
+# Fuente de energia de GPU: "counter" (nvmlDeviceGetTotalEnergyConsumption) o "power"
+# (muestreo de nvmlDeviceGetPowerUsage, metodo legado). Se fija por CLI.
+GPU_ENERGY_SOURCE = "counter"
+# El contador de energia NVML no se actualiza en cada lectura sino a saltos, con un
+# periodo propio del firmware. Se muestrea mucho mas rapido que ese periodo para ubicar
+# con precision el instante de cada salto (ver collapse_counter_steps): el retardo de
+# deteccion es <= este intervalo y, al ser comun a ambos extremos, se cancela en la
+# diferencia de tiempos.
+NVML_ENERGY_SAMPLE_INTERVAL_SEC = 0.002
 # Duracion objetivo del lazo bajo monitoreo. Cuanto mas larga, mejor relacion
 # senal-ruido de la telemetria, a costa de tiempo total de barrido.
 POWER_WINDOW_TARGET_SEC = 0.5
@@ -1023,8 +1041,151 @@ def monitor_energy_cpu(
     sample_queue.put((samples, lost_wraps))
 
 
+def read_gpu_energy_counter_j(handle) -> float:
+    """Lee el contador acumulado de energia de la GPU.
+
+    Args:
+        handle: Handle NVML del dispositivo.
+
+    Returns:
+        Energia acumulada desde la carga del driver, en Joules.
+
+    Raises:
+        pynvml.NVMLError: Si la lectura falla o el dispositivo no expone el contador
+            (anterior a Volta).
+    """
+    # NVML entrega milijoules en un entero de 64 bits: no da la vuelta en la practica.
+    return int(pynvml.nvmlDeviceGetTotalEnergyConsumption(handle)) / 1000.0
+
+
+def verify_gpu_energy_counter(gpu_index: int) -> None:
+    """Comprueba antes del barrido que la GPU expone el contador de energia NVML.
+
+    Fallar aqui, y no a mitad del barrido, evita un CSV con todas las filas de GPU
+    descartadas o, peor, con filas de GPU medidas con metodos distintos.
+
+    Args:
+        gpu_index: Indice del dispositivo NVML.
+
+    Raises:
+        RuntimeError: Si el contador no esta disponible.
+    """
+    try:
+        handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
+        read_gpu_energy_counter_j(handle)
+    except pynvml.NVMLError as ex:
+        raise RuntimeError(
+            f"La GPU {gpu_index} no expone nvmlDeviceGetTotalEnergyConsumption ({ex}). "
+            "Usa --gpu-energy-source power para el muestreo de potencia legado."
+        ) from ex
+
+
+def monitor_energy_gpu(handle, stop_event: threading.Event, sample_queue: queue.Queue) -> None:
+    """Muestrea de forma continua el contador acumulado de energia NVML.
+
+    Es el analogo de monitor_energy_cpu para la GPU y publica el mismo formato, de
+    modo que la ventana del lazo se recorta con energy_from_counter_samples igual que
+    en RAPL.
+
+    Args:
+        handle: Handle NVML del dispositivo.
+        stop_event: Evento que detiene el muestreo.
+        sample_queue: Cola donde se publica la tupla (muestras, reinicios_del_contador);
+            cada muestra es (timestamp, energia_acumulada_j).
+    """
+    samples: List[Tuple[float, float]] = []
+    # El contador es monotono salvo que el driver se recargue; un retroceso se anota
+    # para invalidar la medicion si cae dentro de la ventana, igual que con RAPL.
+    counter_resets: List[float] = []
+
+    def take_sample() -> None:
+        timestamp = time.perf_counter()
+        try:
+            value_j = read_gpu_energy_counter_j(handle)
+        except pynvml.NVMLError:
+            # Lectura puntual fallida: se omite la muestra; el contador acumulado no
+            # pierde energia por ello, solo resolucion temporal en ese tramo.
+            return
+        if samples and value_j < samples[-1][1]:
+            counter_resets.append(timestamp)
+        samples.append((timestamp, value_j))
+
+    while True:
+        take_sample()
+        if stop_event.wait(NVML_ENERGY_SAMPLE_INTERVAL_SEC):
+            break
+
+    # Muestra final posterior a la parada: cubre el borde derecho de la ventana.
+    take_sample()
+    sample_queue.put((samples, counter_resets))
+
+
+def collapse_counter_steps(samples: Sequence[Tuple[float, float]]) -> List[Tuple[float, float]]:
+    """Reduce una serie de contador escalonado a los instantes en que cambio de valor.
+
+    El contador NVML se publica a saltos: entre dos actualizaciones, todas las lecturas
+    repiten el mismo valor. Interpolar sobre esas mesetas pondria toda la energia de un
+    periodo en el instante del salto, con un error de borde de hasta un periodo
+    completo. Conservando solo la primera lectura de cada valor nuevo, la interpolacion
+    lineal reparte la energia de forma uniforme entre actualizaciones reales.
+
+    Args:
+        samples: Muestras (timestamp, energia_acumulada_j) ordenadas por timestamp.
+
+    Returns:
+        La primera muestra seguida de cada muestra donde el valor cambio. Si el
+        contador nunca cambio, se devuelven la primera y la ultima muestra.
+    """
+    if not samples:
+        return []
+    collapsed = [samples[0]]
+    for sample in samples[1:]:
+        if sample[1] != collapsed[-1][1]:
+            collapsed.append(sample)
+    if len(collapsed) == 1 and len(samples) > 1:
+        collapsed.append(samples[-1])
+    return collapsed
+
+
+def energy_from_counter_steps(
+    steps: Sequence[Tuple[float, float]], t_start: float, t_end: float
+) -> Tuple[float, int]:
+    """Estima la energia de una ventana usando solo saltos del contador dentro de ella.
+
+    El periodo de actualizacion del contador NVML es comparable al de la ventana, asi
+    que los dos tramos de borde mezclan potencia del lazo con la del setup o el cierre
+    del proceso; interpolarlos sesga la energia hacia abajo en ambos bordes (en una
+    simulacion con saltos de 100 ms y ventana de 0.5 s, cerca de -9 %). Por eso la
+    potencia se toma entre el primer y el ultimo salto que caen DENTRO de la ventana,
+    tramo compuesto solo por periodos completos del lazo, y se extiende a la duracion
+    total de la ventana.
+
+    Args:
+        steps: Serie colapsada por collapse_counter_steps, (timestamp, energia_j).
+        t_start: Inicio de la ventana.
+        t_end: Fin de la ventana.
+
+    Returns:
+        Tupla (energia_j, saltos_dentro_de_la_ventana). Con menos de dos saltos
+        dentro de la ventana la potencia no es estimable y la energia es 0.0; el
+        llamador debe rechazar la medicion segun MIN_SAMPLES_IN_WINDOW.
+    """
+    # La primera muestra de la serie no es un salto real (ver collapse_counter_steps).
+    inside = [s for s in steps[1:] if t_start <= s[0] <= t_end]
+    if len(inside) < 2:
+        return 0.0, len(inside)
+    span = inside[-1][0] - inside[0][0]
+    if span <= 0.0:
+        return 0.0, len(inside)
+    power_w = (inside[-1][1] - inside[0][1]) / span
+    return max(0.0, power_w * (t_end - t_start)), len(inside)
+
+
 def measure_idle_power_gpu(gpu_index: int, duration_sec: float) -> float:
     """Mide la potencia en reposo de la GPU con NVML.
+
+    Usa la misma fuente que las mediciones (GPU_ENERGY_SOURCE): restar una linea base
+    obtenida con otro metodo introduciria un sesgo sistematico en la potencia activa.
 
     Args:
         gpu_index: Indice del dispositivo NVML.
@@ -1033,27 +1194,55 @@ def measure_idle_power_gpu(gpu_index: int, duration_sec: float) -> float:
     Returns:
         Potencia media en Watts; 0.0 si la medicion no fue posible.
     """
+    use_counter = GPU_ENERGY_SOURCE == "counter"
     try:
         handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
         stop_event = threading.Event()
         sample_queue: queue.Queue = queue.Queue(maxsize=1)
+        monitor = monitor_energy_gpu if use_counter else monitor_power_gpu
         thread = threading.Thread(
-            target=monitor_power_gpu, args=(handle, stop_event, sample_queue), daemon=True
+            target=monitor, args=(handle, stop_event, sample_queue), daemon=True
         )
         thread.start()
         time.sleep(duration_sec)
         stop_event.set()
         thread.join()
-        samples = sample_queue.get() if not sample_queue.empty() else []
+        payload = sample_queue.get() if not sample_queue.empty() else None
     except Exception as ex:
         print(f"[!] No se pudo medir la potencia idle de GPU: {ex}", file=sys.stderr)
         return 0.0
 
-    if len(samples) < 2:
+    if not use_counter:
+        samples = payload or []
+        if len(samples) < 2:
+            return 0.0
+        energy_j, _ = energy_from_power_samples(samples, samples[0][0], samples[-1][0])
+        span = samples[-1][0] - samples[0][0]
+        return energy_j / span if span > 0.0 else 0.0
+
+    samples, counter_resets = payload if payload else ([], [])
+    if counter_resets:
+        print(
+            "[!] El contador de energia NVML retrocedio al medir el idle de GPU; "
+            "se omite la linea base.",
+            file=sys.stderr,
+        )
         return 0.0
-    energy_j, _ = energy_from_power_samples(samples, samples[0][0], samples[-1][0])
-    span = samples[-1][0] - samples[0][0]
-    return energy_j / span if span > 0.0 else 0.0
+    # La primera lectura no marca un salto real del contador (su valor se publico en un
+    # instante desconocido anterior), asi que el reposo se mide entre el primer y el
+    # ultimo salto observados.
+    steps = collapse_counter_steps(samples)[1:]
+    if len(steps) < 2:
+        print(
+            "[!] El contador de energia NVML no se actualizo lo suficiente durante la "
+            "medicion de idle; aumenta --idle-measure-sec.",
+            file=sys.stderr,
+        )
+        return 0.0
+    span = steps[-1][0] - steps[0][0]
+    if span <= 0.0:
+        return 0.0
+    return (steps[-1][1] - steps[0][1]) / span
 
 
 def measure_idle_power_cpu(rapl_paths: Sequence[str], duration_sec: float) -> float:
@@ -1176,16 +1365,20 @@ def run_monitored_execution(
     stop_event = threading.Event()
     monitor_thread: Optional[threading.Thread] = None
     rapl_paths: List[str] = []
+    gpu_uses_counter = GPU_ENERGY_SOURCE == "counter"
 
     if device == "gpu":
         idle_power_w = IDLE_POWER_GPU
+        energy_source = "nvml_counter" if gpu_uses_counter else "nvml_power"
         handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
+        monitor = monitor_energy_gpu if gpu_uses_counter else monitor_power_gpu
         monitor_thread = threading.Thread(
-            target=monitor_power_gpu, args=(handle, stop_event, sample_queue), daemon=True
+            target=monitor, args=(handle, stop_event, sample_queue), daemon=True
         )
         monitor_thread.start()
     else:
         idle_power_w = IDLE_POWER_CPU
+        energy_source = "rapl_counter"
         rapl_paths = find_rapl_energy_paths()
         if rapl_paths:
             monitor_thread = threading.Thread(
@@ -1223,10 +1416,11 @@ def run_monitored_execution(
     window_sec = loop_end - loop_start
 
     payload = sample_queue.get() if not sample_queue.empty() else None
-    if device == "gpu":
+    if device == "gpu" and not gpu_uses_counter:
         samples = payload or []
         lost_wraps: List[float] = []
     else:
+        # RAPL y el contador NVML publican el mismo formato (muestras, vueltas/reinicios).
         samples, lost_wraps = payload if payload else ([], [])
 
     # Una vuelta del contador que no se pudo reconstruir solo corrompe la medicion si
@@ -1234,16 +1428,21 @@ def run_monitored_execution(
     # acumulada, asi que un salto anterior o posterior se cancela.
     wraps_in_window = [t for t in lost_wraps if loop_start <= t <= loop_end]
     if wraps_in_window:
-        raise MeasurementError(
-            f"El contador RAPL dio la vuelta durante la ventana de {context} y no se pudo "
-            "reconstruir la energia perdida (falta max_energy_range_uj)."
-        )
+        if device == "gpu":
+            detail = "El contador de energia NVML retrocedio (recarga del driver)"
+        else:
+            detail = (
+                "El contador RAPL dio la vuelta y no se pudo reconstruir la energia "
+                "perdida (falta max_energy_range_uj)"
+            )
+        raise MeasurementError(f"{detail} durante la ventana de {context}.")
 
     metrics: Dict[str, float] = {
         "Loop_Window_sec": window_sec,
         "Iters_K": loop_iters,
         "Idle_Power_W": idle_power_w,
         "Wall_Elapsed_sec": end_wall - start_wall,
+        "Energy_Source": energy_source,
     }
 
     if not samples:
@@ -1262,7 +1461,12 @@ def run_monitored_execution(
             f"lazo [{loop_start:.6f}, {loop_end:.6f}]."
         )
 
-    if device == "gpu":
+    if device == "gpu" and gpu_uses_counter:
+        # samples_inside cuenta actualizaciones del contador dentro de la ventana.
+        energy_window_j, samples_inside = energy_from_counter_steps(
+            collapse_counter_steps(samples), loop_start, loop_end
+        )
+    elif device == "gpu":
         energy_window_j, samples_inside = energy_from_power_samples(samples, loop_start, loop_end)
     else:
         energy_window_j, samples_inside = energy_from_counter_samples(samples, loop_start, loop_end)
@@ -1742,6 +1946,9 @@ def init_nvml_if_needed(device_list, gpu_index):
             raise RuntimeError(
                 f"gpu-index invalido: {gpu_index}. GPUs disponibles: {device_count}"
             )
+        if GPU_ENERGY_SOURCE == "counter":
+            verify_gpu_energy_counter(gpu_index)
+        print(f"Fuente de energia GPU: {GPU_ENERGY_SOURCE}")
     except Exception:
         pynvml.nvmlShutdown()
         raise
@@ -1815,6 +2022,8 @@ def run_gemm(args):
             "Power_Samples",
             "Idle_Power_W",
             "Wall_Elapsed_sec",
+            # Metodo de telemetria de la fila, para no mezclar fuentes de energia de GPU.
+            "Energy_Source",
         ])
 
         if args.full_dim_sweep:
@@ -2017,6 +2226,8 @@ def run_fft(args):
             "Power_Samples",
             "Idle_Power_W",
             "Wall_Elapsed_sec",
+            # Metodo de telemetria de la fila, para no mezclar fuentes de energia de GPU.
+            "Energy_Source",
         ])
 
         cases = []
@@ -2173,7 +2384,7 @@ def run_fft(args):
 
 
 def main():
-    global POWER_WINDOW_TARGET_SEC
+    global POWER_WINDOW_TARGET_SEC, GPU_ENERGY_SOURCE
     parser = argparse.ArgumentParser(
         description="Orquestador de benchmarking GEMM/FFT con monitoreo de potencia"
     )
@@ -2367,6 +2578,16 @@ def main():
         ),
     )
     parser.add_argument(
+        "--gpu-energy-source",
+        choices=["counter", "power"],
+        default=GPU_ENERGY_SOURCE,
+        help=(
+            "Telemetria de energia en GPU: 'counter' usa el contador acumulado "
+            "nvmlDeviceGetTotalEnergyConsumption (recomendado); 'power' integra "
+            "muestras de nvmlDeviceGetPowerUsage (legado, ruidoso en ventanas cortas)."
+        ),
+    )
+    parser.add_argument(
         "--gemm-warmup",
         type=int,
         default=4,
@@ -2457,6 +2678,7 @@ def main():
     if args.power_window_sec <= 0.0:
         raise ValueError("--power-window-sec debe ser positivo")
     POWER_WINDOW_TARGET_SEC = args.power_window_sec
+    GPU_ENERGY_SOURCE = args.gpu_energy_source
     # Las lineas base de reposo se fijan en configure_idle_baselines(), ya con NVML activo.
 
     # Compatibilidad: --binary sobreescribe --gemm-binary-gpu
