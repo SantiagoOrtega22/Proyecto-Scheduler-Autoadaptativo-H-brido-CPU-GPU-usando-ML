@@ -1,0 +1,20 @@
+\begin{table}[H]
+\centering
+\small
+\renewcommand{\arraystretch}{1.3}
+\caption{Desempeño sobre tamaños no observados dentro de los rangos caracterizados (5 particiones por tamaño; el agente, además, con 5 semillas). Media $\pm$ desviación estándar.}
+\label{tab:interpolacion}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{|l|c|c|c|c|c|c|c|}
+\hline
+\textbf{Política} & \textbf{Precisión (\%)} & \textbf{GEMM (\%)} & \textbf{FFT 1D (\%)} & \textbf{FFT 2D (\%)} & \textbf{FFT 3D (\%)} & \textbf{Tareas a GPU (\%)} & \textbf{Sobrecosto de EDP (\%)} \\ \hline
+\textbf{Agente DQN} & 97.22 $\pm$ 0.37 & 98.44 $\pm$ 0.29 & 96.62 $\pm$ 0.70 & 97.99 $\pm$ 0.45 & 91.86 $\pm$ 2.06 & 78.4 $\pm$ 0.4 & 1.16 $\pm$ 0.19 \\ \hline
+Vecino más cercano & 95.32 $\pm$ 0.33 & 98.74 $\pm$ 0.31 & 92.16 $\pm$ 0.92 & 96.63 $\pm$ 0.62 & 87.70 $\pm$ 1.79 & 77.4 $\pm$ 0.8 & 6.86 $\pm$ 0.74 \\ \hline
+Árbol de decisión & 97.63 $\pm$ 0.48 & 98.98 $\pm$ 0.35 & 97.04 $\pm$ 0.99 & 98.03 $\pm$ 0.41 & 92.27 $\pm$ 2.58 & 78.4 $\pm$ 0.5 & 0.92 $\pm$ 0.34 \\ \hline
+Umbral de tamaño & 97.04 $\pm$ 0.33 & 98.84 $\pm$ 0.18 & 95.47 $\pm$ 0.41 & 98.03 $\pm$ 0.41 & 92.05 $\pm$ 2.65 & 79.4 $\pm$ 0.5 & 1.31 $\pm$ 0.08 \\ \hline
+Regresión logística & 96.79 $\pm$ 0.29 & 98.33 $\pm$ 0.39 & 95.60 $\pm$ 0.45 & 97.81 $\pm$ 0.50 & 91.56 $\pm$ 2.37 & 79.0 $\pm$ 0.4 & 1.48 $\pm$ 0.21 \\ \hline
+Solo GPU & 76.90 $\pm$ 0.43 & 51.29 $\pm$ 0.49 & 95.47 $\pm$ 0.41 & 98.03 $\pm$ 0.41 & 92.05 $\pm$ 2.65 & 100.0 & 72.11 $\pm$ 3.53 \\ \hline
+\end{tabular}%
+}
+\end{table}
+% FUENTE: evaluar_interpolacion.py -> resultados_interpolacion/resumen.json

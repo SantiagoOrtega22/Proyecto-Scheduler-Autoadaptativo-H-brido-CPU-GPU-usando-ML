@@ -4,6 +4,11 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 
+try:  # Mismo techo de normalización que usa el codificador (Dim_k_log2 = log2(N) / MAX_LOG2_DIM).
+    from Entorno.codificador_csv import MAX_LOG2_DIM
+except ImportError:  # gym.py importado fuera del paquete Entorno
+    from codificador_csv import MAX_LOG2_DIM
+
 
 class PlanificadorEnv(gym.Env):
     """Entorno Gymnasium para planificar tareas GEMM y FFT en CPU/GPU optimizando EDP mediante datos de benchmark."""
@@ -16,7 +21,26 @@ class PlanificadorEnv(gym.Env):
         holdout_fraction: float = 0.0,
         split: str = "all",
         split_seed: int = 42,
+        modo_particion: str = "filas",
+        particion: int = 0,
+        n_particiones: int = 5,
     ) -> None:
+        """
+        Args:
+            csv_path: CSV codificado por codificador_csv.py.
+            tamano_lote: Tareas por episodio.
+            shuffle: Si True, cada episodio muestrea tareas al azar.
+            holdout_fraction: Fracción reservada en el modo 'filas' (0.0 = sin reserva,
+                comportamiento original).
+            split: 'train', 'holdout' o 'all' (default, dataset completo).
+            split_seed: Semilla de la partición por filas.
+            modo_particion: 'filas' (default, partición aleatoria por filas, igual que
+                antes de existir este parámetro) o 'tamano' (partición por tamaño de
+                problema, ver `asignar_particiones_por_tamano`). En modo 'tamano' la
+                reserva se activa con split='train' o 'holdout' e ignora holdout_fraction.
+            particion: Índice (0..n_particiones-1) de la partición reservada en modo 'tamano'.
+            n_particiones: Número de particiones en modo 'tamano'.
+        """
         super().__init__()
         self.tamano_lote = tamano_lote
         self.shuffle = shuffle
@@ -37,13 +61,115 @@ class PlanificadorEnv(gym.Env):
         else:
             self._generar_dataset_sintetico()
 
-        if holdout_fraction > 0.0:
+        if modo_particion == "tamano":
+            if split in ("train", "holdout"):
+                self.dataset_tareas = self._dividir_por_tamano(
+                    self.dataset_tareas, particion, n_particiones, split
+                )
+        elif modo_particion != "filas":
+            raise ValueError(f"modo_particion debe ser 'filas' o 'tamano', no '{modo_particion}'.")
+        elif holdout_fraction > 0.0:
             self.dataset_tareas = self._dividir_dataset(
                 self.dataset_tareas, holdout_fraction, split, split_seed
             )
 
         self.cola_tareas: list[dict] = []
         self.estado_actual: np.ndarray | None = None
+
+    @staticmethod
+    def clave_tamano(obs: np.ndarray) -> tuple[str, float]:
+        """Identifica la carga y el tamaño de problema de una tarea a partir de su vector.
+
+        Todas las variantes de un mismo tamaño (precisión, transposición, dominio,
+        dirección, layout) comparten la clave. El tamaño se lee de Dim_1_log2
+        (obs[2]): N en GEMM (M = N = K) y en FFT 2D/3D (Nx = Ny = Nz), Nx en FFT 1D.
+        Se usa el valor codificado tal cual, sin reconstruir N, para que la clave sea
+        exacta aunque la observación venga en float32.
+
+        Args:
+            obs: Vector de observación de 23 dimensiones.
+
+        Returns:
+            tuple[str, float]: (carga, Dim_1_log2), con carga en
+                {'GEMM', 'FFT1D', 'FFT2D', 'FFT3D'}.
+        """
+        if obs[0] > 0.5:
+            carga = "GEMM"
+        elif obs[4] > 0.0:
+            carga = "FFT3D"
+        elif obs[3] > 0.0:
+            carga = "FFT2D"
+        else:
+            carga = "FFT1D"
+        return carga, float(obs[2])
+
+    @staticmethod
+    def asignar_particiones_por_tamano(tareas: list[dict], n_particiones: int = 5) -> list[int]:
+        """Asigna cada tarea a una partición según su tamaño de problema.
+
+        Unidad de partición: el tamaño, no la fila. Todas las variantes de un tamaño
+        caen en la misma partición, para que ninguna configuración reservada tenga
+        casi duplicados en el entrenamiento. Dentro de cada carga y de cada octava
+        [2^k, 2^(k+1)), los tamaños se ordenan y se reparten de forma alterna
+        (0, 1, ..., n-1, 0, 1, ...), de modo que cada partición cubre todo el rango
+        del barrido y los vecinos inmediatos de un tamaño reservado quedan en el
+        entrenamiento: es una prueba de interpolación dentro de los rangos medidos.
+        El punto de inicio de la alternancia rota con la octava para equilibrar el
+        número de tareas entre particiones. El tamaño mínimo y el máximo de cada
+        carga se dejan siempre en el entrenamiento (partición -1): reservarlos sería
+        extrapolar fuera del rango, no interpolar. La asignación es determinista y
+        no usa semilla.
+
+        Args:
+            tareas: Tareas cargadas del CSV (cada una con clave 'obs').
+            n_particiones: Número de particiones.
+
+        Returns:
+            list[int]: Partición (0..n_particiones-1) de cada tarea, en el mismo orden,
+                o -1 para los extremos del rango, que nunca se reservan.
+        """
+        claves = [PlanificadorEnv.clave_tamano(t["obs"]) for t in tareas]
+        # Octava de cada tamaño: floor(log2 N) = floor(Dim_1_log2 * MAX_LOG2_DIM).
+        # El 1e-4 absorbe el redondeo float32 en las potencias de dos exactas.
+        grupos: dict[tuple[str, int], set[float]] = {}
+        extremos: dict[str, tuple[float, float]] = {}
+        for carga, valor in claves:
+            octava = int(np.floor(valor * MAX_LOG2_DIM + 1e-4))
+            grupos.setdefault((carga, octava), set()).add(valor)
+            lo, hi = extremos.get(carga, (valor, valor))
+            extremos[carga] = (min(lo, valor), max(hi, valor))
+
+        particion_de: dict[tuple[str, float], int] = {}
+        for (carga, octava), valores in grupos.items():
+            for rango, valor in enumerate(sorted(valores)):
+                particion_de[(carga, valor)] = (rango + octava) % n_particiones
+        for carga, (lo, hi) in extremos.items():
+            particion_de[(carga, lo)] = -1
+            particion_de[(carga, hi)] = -1
+
+        return [particion_de[c] for c in claves]
+
+    @staticmethod
+    def _dividir_por_tamano(
+        tareas: list[dict], particion: int, n_particiones: int, split: str
+    ) -> list[dict]:
+        """Devuelve las tareas de entrenamiento o las reservadas de la partición indicada.
+
+        Args:
+            tareas: Lista completa de tareas.
+            particion: Índice de la partición reservada.
+            n_particiones: Número de particiones.
+            split: 'train' (todas menos la reservada) u 'holdout' (solo la reservada).
+
+        Returns:
+            list[dict]: Subconjunto solicitado.
+        """
+        if not 0 <= particion < n_particiones:
+            raise ValueError(f"particion debe estar en [0, {n_particiones - 1}].")
+        asignacion = PlanificadorEnv.asignar_particiones_por_tamano(tareas, n_particiones)
+        if split == "holdout":
+            return [t for t, p in zip(tareas, asignacion) if p == particion]
+        return [t for t, p in zip(tareas, asignacion) if p != particion]
 
     @staticmethod
     def _dividir_dataset(

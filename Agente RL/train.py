@@ -44,6 +44,9 @@ def entrenar_agente(
     seed: int = BENCH_SEED,
     timesteps: int = 100000,
     dataset: str | None = None,
+    modo_particion: str = "filas",
+    particion: int = 0,
+    n_particiones: int = 5,
 ) -> str:
     """
     Instancia el entorno PlanificadorEnv y entrena un agente DQN
@@ -71,6 +74,12 @@ def entrenar_agente(
             porque se midió en otro trabajo con un desfase de potencia frente a
             la principal. Cualquier script que evalúe el modelo resultante debe
             usar este MISMO CSV, o la observación no coincidirá con lo aprendido.
+        modo_particion: 'filas' (default, comportamiento original) o 'tamano'
+            (partición por tamaño de problema para la prueba de interpolación,
+            ver PlanificadorEnv.asignar_particiones_por_tamano y
+            evaluar_interpolacion.py).
+        particion: Partición reservada en modo 'tamano'.
+        n_particiones: Número de particiones en modo 'tamano'.
 
     Returns:
         str: Ruta absoluta del modelo guardado (sin extensión .zip).
@@ -84,6 +93,7 @@ def entrenar_agente(
     modelo_path = os.path.join(base_dir, modelo_nombre)
 
     os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(modelo_path), exist_ok=True)  # modelo_nombre puede incluir subcarpeta
 
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"No se encontró el dataset en: {csv_path}")
@@ -95,6 +105,9 @@ def entrenar_agente(
         holdout_fraction=holdout_fraction,
         split=split,
         split_seed=BENCH_SEED,
+        modo_particion=modo_particion,
+        particion=particion,
+        n_particiones=n_particiones,
     )
     env = Monitor(env_base, log_dir)
 
