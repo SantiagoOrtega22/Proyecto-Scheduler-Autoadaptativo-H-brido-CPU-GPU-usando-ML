@@ -61,8 +61,18 @@ module load devtools/nvidia/hpc_sdk/nvhpc/23.1
 # 4. Ejecución de Benchmarks
 echo "[4/4] Ejecutando Benchmarks RL..."
 
-#echo "=================== EJECUCIÓN GEMM ==================="
-#python3 -u benchmark_runner.py --benchmark gemm --mode continuous-rl --device both
+echo "=================== EJECUCIÓN GEMM ==================="
+# Barrido completo de GEMM con la energia de GPU medida por el contador acumulado de NVML
+# (validado en validacion_gpu_counter.csv: CV de Pavg de GPU < 5 % entre repeticiones).
+# --repetitions 3: se usa la mediana por configuracion al construir las etiquetas, porque
+#   ~9 % de las ejecuciones de CPU salen con tiempos atipicos (+50-80 %) por interrupciones.
+# --power-window-sec 0.5: no bajarlo; el contador NVML se actualiza cada ~100 ms y con
+#   0.5 s caen solo 4-6 saltos dentro de la ventana.
+python3 -u benchmark_runner.py --benchmark gemm --mode continuous-rl --device both \
+    --repetitions 0 \
+    --power-window-sec 0.5 --idle-measure-sec 3 \
+    --gpu-energy-source counter \
+    --output gemm_counter_full.csv
 
 echo "=================== EJECUCIÓN FFT ===================="
 # --power-window-sec: duración del lazo bajo monitoreo energético. Con 0.5 s cada
@@ -84,7 +94,7 @@ echo "=================== EJECUCIÓN FFT ===================="
 #    --power-window-sec 0.5 --idle-measure-sec 3 \
 #    --output fft_1d_pequenos.csv
 
-echo "============ VALIDACION CONTADOR DE ENERGIA NVML ============"
+#echo "============ VALIDACION CONTADOR DE ENERGIA NVML ============"
 # Prueba corta para validar --gpu-energy-source counter frente al muestreo de potencia
 # legado. Los tamanos son los que mostraron mas dispersion de Pavg en GPU en el job 7833:
 #   N=288 (gana CPU), N=1216 (frontera: el ganador en EDP cambiaba segun OpA/OpB) y
@@ -93,23 +103,23 @@ echo "============ VALIDACION CONTADOR DE ENERGIA NVML ============"
 #   pocos puntos, y en N=1216 S el ganador en EDP no debe depender de OpA/OpB.
 
 # A) Metodo nuevo (contador acumulado NVML), CPU y GPU.
-python3 -u benchmark_runner.py --benchmark gemm --device both \
-    --sizes 288,1216,2240 --precisions S,D,Z \
-    --sweep-transpose --op-a-list N,T --op-b-list N,T \
-    --repetitions 5 \
-    --power-window-sec 0.5 --idle-measure-sec 3 \
-    --gpu-energy-source counter \
-    --output validacion_gpu_counter.csv
+#python3 -u benchmark_runner.py --benchmark gemm --device both \
+#    --sizes 288,1216,2240 --precisions S,D,Z \
+#    --sweep-transpose --op-a-list N,T --op-b-list N,T \
+#    --repetitions 5 \
+#    --power-window-sec 0.5 --idle-measure-sec 3 \
+#    --gpu-energy-source counter \
+#    --output validacion_gpu_counter.csv
 
 # B) Metodo legado (muestreo de potencia), solo GPU, mismos casos: sirve de comparacion
 #    directa en el mismo nodo y en el mismo job.
-python3 -u benchmark_runner.py --benchmark gemm --device gpu \
-    --sizes 288,1216,2240 --precisions S,D,Z \
-    --sweep-transpose --op-a-list N,T --op-b-list N,T \
-    --repetitions 5 \
-    --power-window-sec 0.5 --idle-measure-sec 3 \
-    --gpu-energy-source power \
-    --output validacion_gpu_power.csv
+#python3 -u benchmark_runner.py --benchmark gemm --device gpu \
+#    --sizes 288,1216,2240 --precisions S,D,Z \
+#    --sweep-transpose --op-a-list N,T --op-b-list N,T \
+#    --repetitions 5 \
+#    --power-window-sec 0.5 --idle-measure-sec 3 \
+#    --gpu-energy-source power \
+#    --output validacion_gpu_power.csv
 
 echo "================================================================="
 echo "Finalizado con éxito a las: $(date)"
