@@ -69,7 +69,7 @@ echo "=================== EJECUCIÓN GEMM ==================="
 # --power-window-sec 0.5: no bajarlo; el contador NVML se actualiza cada ~100 ms y con
 #   0.5 s caen solo 4-6 saltos dentro de la ventana.
 python3 -u benchmark_runner.py --benchmark gemm --mode continuous-rl --device both \
-    --repetitions 0 \
+    --repetitions 1\
     --power-window-sec 0.5 --idle-measure-sec 3 \
     --gpu-energy-source counter \
     --output gemm_counter_full.csv
