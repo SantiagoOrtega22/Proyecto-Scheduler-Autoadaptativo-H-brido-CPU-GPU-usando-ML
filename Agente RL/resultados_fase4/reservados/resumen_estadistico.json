@@ -1,0 +1,169 @@
+{
+  "fuente": "reservados",
+  "dataset": "/home/santi/Escritorio/Universidad/Proyecto/Proyecto-Scheduler-Autoadaptativo-H-brido-CPU-GPU-usando-ML/Agente RL/Entorno/dataset_rl.csv",
+  "n_colas": 100,
+  "tareas_por_cola": 200,
+  "semillas_colas": [
+    0,
+    99
+  ],
+  "agente": "media de los 5 agentes entrenados sin la partición de la cola, semillas [42, 43, 44, 45, 46]",
+  "metrica": "d = 100 * (EDP_sis(politica) / EDP_sis(agente) - 1); d > 0: el agente es mejor",
+  "prueba": "Wilcoxon de rangos con signo pareada por cola, aproximación normal, Holm sobre 6 comparaciones",
+  "umbral_relevancia_pct": 1.0,
+  "alfa": 0.05,
+  "politicas": {
+    "Solo CPU": {
+      "mediana": 1396.964893235508,
+      "q1": 1193.9787956884368,
+      "q3": 1551.4461004767413,
+      "iqr": 357.46730478830455,
+      "colas_agente_mejor": 100,
+      "colas_politica_mejor": 0,
+      "n": 100,
+      "W_pos": 5050.0,
+      "Z": 8.681770230106196,
+      "p": 3.896559845095909e-18,
+      "r": 0.8681770230106196,
+      "p_holm": 2.3379359070575454e-17,
+      "significativa": true,
+      "supera_umbral": true,
+      "conclusion": "agente mejor"
+    },
+    "Solo GPU": {
+      "mediana": 0.22870529812480944,
+      "q1": 0.16652880260782377,
+      "q3": 0.29779127130131755,
+      "iqr": 0.13126246869349378,
+      "colas_agente_mejor": 100,
+      "colas_politica_mejor": 0,
+      "n": 100,
+      "W_pos": 5050.0,
+      "Z": 8.681770230106196,
+      "p": 3.896559845095909e-18,
+      "r": 0.8681770230106196,
+      "p_holm": 2.3379359070575454e-17,
+      "significativa": true,
+      "supera_umbral": false,
+      "conclusion": "significativa, no relevante"
+    },
+    "MET": {
+      "mediana": 0.05782681611747886,
+      "q1": 0.016820168451542328,
+      "q3": 0.11239700286597154,
+      "iqr": 0.09557683441442921,
+      "colas_agente_mejor": 80,
+      "colas_politica_mejor": 20,
+      "n": 100,
+      "W_pos": 3831.0,
+      "Z": 4.490452245749977,
+      "p": 7.107210868496024e-06,
+      "r": 0.44904522457499774,
+      "p_holm": 7.107210868496024e-06,
+      "significativa": true,
+      "supera_umbral": false,
+      "conclusion": "significativa, no relevante"
+    },
+    "MCT": {
+      "mediana": -4.339853181998854,
+      "q1": -7.483688539998181,
+      "q3": -2.879565774614215,
+      "iqr": 4.604122765383966,
+      "colas_agente_mejor": 3,
+      "colas_politica_mejor": 97,
+      "n": 100,
+      "W_pos": 44.0,
+      "Z": -8.530483936987514,
+      "p": 1.4573676877736123e-17,
+      "r": 0.8530483936987514,
+      "p_holm": 4.3721030633208367e-17,
+      "significativa": true,
+      "supera_umbral": true,
+      "conclusion": "política mejor"
+    },
+    "Min-Min": {
+      "mediana": -3.3440567134314367,
+      "q1": -4.761249634755002,
+      "q3": -2.0524929850763125,
+      "iqr": 2.7087566496786892,
+      "colas_agente_mejor": 4,
+      "colas_politica_mejor": 96,
+      "n": 100,
+      "W_pos": 15.0,
+      "Z": -8.6301953574521,
+      "p": 6.12472726248735e-18,
+      "r": 0.8630195357452101,
+      "p_holm": 2.44989090499494e-17,
+      "significativa": true,
+      "supera_umbral": true,
+      "conclusion": "política mejor"
+    },
+    "Max-Min": {
+      "mediana": 3.735899410234622,
+      "q1": 1.442388511980891,
+      "q3": 5.43326897021601,
+      "iqr": 3.990880458235119,
+      "colas_agente_mejor": 89,
+      "colas_politica_mejor": 11,
+      "n": 100,
+      "W_pos": 4803.0,
+      "Z": 7.832503993735412,
+      "p": 4.782479999455785e-15,
+      "r": 0.7832503993735412,
+      "p_holm": 9.56495999891157e-15,
+      "significativa": true,
+      "supera_umbral": true,
+      "conclusion": "agente mejor"
+    },
+    "Oráculo por tarea": {
+      "mediana": -0.02301695727801034,
+      "q1": -0.0518356241641843,
+      "q3": -0.004371018967178064,
+      "iqr": 0.04746460519700624,
+      "colas_agente_mejor": 17,
+      "colas_politica_mejor": 83
+    }
+  },
+  "sensibilidad_por_semilla_dqn": {
+    "42": {
+      "Solo CPU": 1396.9646358450605,
+      "Solo GPU": 0.23161575604561113,
+      "MET": 0.06078636010617977,
+      "MCT": -4.338030942735332,
+      "Min-Min": -3.337246436743019,
+      "Max-Min": 3.736097816748263
+    },
+    "43": {
+      "Solo CPU": 1396.9563674491874,
+      "Solo GPU": 0.22434231280848982,
+      "MET": 0.05677359667787263,
+      "MCT": -4.346841813124525,
+      "Min-Min": -3.3397398357136177,
+      "Max-Min": 3.735859712776246
+    },
+    "44": {
+      "Solo CPU": 1396.9646358450605,
+      "Solo GPU": 0.22869155006270958,
+      "MET": 0.06444420541509288,
+      "MCT": -4.338180477768994,
+      "Min-Min": -3.339801750389648,
+      "Max-Min": 3.735859712776246
+    },
+    "45": {
+      "Solo CPU": 1396.974191373395,
+      "Solo GPU": 0.22313769517610105,
+      "MET": 0.05451919950069106,
+      "MCT": -4.338030942735332,
+      "Min-Min": -3.3481443557073334,
+      "Max-Min": 3.7358200970678435
+    },
+    "46": {
+      "Solo CPU": 1396.9646358450605,
+      "Solo GPU": 0.22661679572465454,
+      "MET": 0.05961356810787466,
+      "MCT": -4.338180477768994,
+      "Min-Min": -3.3470185768229466,
+      "Max-Min": 3.735859712776246
+    }
+  }
+}

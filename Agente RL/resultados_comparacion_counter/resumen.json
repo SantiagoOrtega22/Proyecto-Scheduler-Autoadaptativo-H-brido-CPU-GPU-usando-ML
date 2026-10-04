@@ -1,0 +1,124 @@
+{
+  "entradas": {
+    "actual": {
+      "modelo": "/home/santi/Escritorio/Universidad/Proyecto/Proyecto-Scheduler-Autoadaptativo-H-brido-CPU-GPU-usando-ML/Agente RL/modelo_dqn_scheduler.zip",
+      "dataset": "/home/santi/Escritorio/Universidad/Proyecto/Proyecto-Scheduler-Autoadaptativo-H-brido-CPU-GPU-usando-ML/Agente RL/Entorno/dataset_rl.csv",
+      "monitor": "/home/santi/Escritorio/Universidad/Proyecto/Proyecto-Scheduler-Autoadaptativo-H-brido-CPU-GPU-usando-ML/Agente RL/logs_entrenamiento/monitor.csv"
+    },
+    "nuevo": {
+      "modelo": "/home/santi/Escritorio/Universidad/Proyecto/Proyecto-Scheduler-Autoadaptativo-H-brido-CPU-GPU-usando-ML/Agente RL/modelo_dqn_counter.zip",
+      "dataset": "/home/santi/Escritorio/Universidad/Proyecto/Proyecto-Scheduler-Autoadaptativo-H-brido-CPU-GPU-usando-ML/Agente RL/Entorno/dataset_rl_counter.csv",
+      "monitor": "/home/santi/Escritorio/Universidad/Proyecto/Proyecto-Scheduler-Autoadaptativo-H-brido-CPU-GPU-usando-ML/Agente RL/logs_entrenamiento/counter/monitor.csv"
+    }
+  },
+  "convergencia": {
+    "actual": {
+      "recompensa_paso": 0.7814254533999998,
+      "recompensa_oraculo": 0.8103673473025348,
+      "fraccion_oraculo": 0.9642854638715717,
+      "episodios": 1000
+    },
+    "nuevo": {
+      "recompensa_paso": 0.7712528243999999,
+      "recompensa_oraculo": 0.7984925806802747,
+      "fraccion_oraculo": 0.9658860245676072,
+      "episodios": 1000
+    }
+  },
+  "por_tarea": {
+    "actual -> actual": {
+      "n": 21844,
+      "precision": 97.2578282365867,
+      "pct_gpu": 78.53872917048159,
+      "exceso_edp": 2.6660167851133565e-05,
+      "perdida_recompensa": 0.00773921566656757,
+      "sobrecosto_geom": 1.1199198765436513,
+      "precision_GEMM": 98.43277129269346,
+      "precision_FFT1D": 96.68708240534521,
+      "precision_FFT2D": 98.02777777777779,
+      "precision_FFT3D": 91.98008849557522
+    },
+    "actual -> nuevo": {
+      "n": 21657,
+      "precision": 89.97091009835158,
+      "pct_gpu": 78.35341921780487,
+      "exceso_edp": 0.000365990615014411,
+      "perdida_recompensa": 0.04746749237990516,
+      "sobrecosto_geom": 7.902997444084359,
+      "precision_GEMM": 81.04798676227247,
+      "precision_FFT1D": 96.68708240534521,
+      "precision_FFT2D": 98.02777777777779,
+      "precision_FFT3D": 91.98008849557522
+    },
+    "nuevo -> actual": {
+      "n": 21844,
+      "precision": 89.96062992125984,
+      "pct_gpu": 86.30287493133125,
+      "exceso_edp": 6.35677456006789e-05,
+      "perdida_recompensa": 0.051107919285957155,
+      "sobrecosto_geom": 9.431098283342255,
+      "precision_GEMM": 81.3013402507566,
+      "precision_FFT1D": 96.56180400890868,
+      "precision_FFT2D": 98.02777777777779,
+      "precision_FFT3D": 91.98008849557522
+    },
+    "nuevo -> nuevo": {
+      "n": 21657,
+      "precision": 96.77702359514245,
+      "pct_gpu": 86.18460543934987,
+      "exceso_edp": 9.990636913315143e-05,
+      "perdida_recompensa": 0.00873398061695645,
+      "sobrecosto_geom": 1.2495881296138656,
+      "precision_GEMM": 97.40761169332598,
+      "precision_FFT1D": 96.56180400890868,
+      "precision_FFT2D": 98.02777777777779,
+      "precision_FFT3D": 91.98008849557522
+    }
+  },
+  "cambio_oraculo_gemm": {
+    "configs_actual": 9252,
+    "configs_nuevo": 9065,
+    "configs_comunes": 9065,
+    "cambian_cpu_a_gpu": 1779,
+    "cambian_gpu_a_cpu": 0,
+    "pct_cambian": 19.624931053502483
+  },
+  "fase4": {
+    "dataset_rl.csv": {
+      "DQN actual": {
+        "Solo CPU": 1352.7738687078647,
+        "Solo GPU": 0.21422420665663244,
+        "MET": 0.043110663979673,
+        "MCT": -4.954424638011684,
+        "Min-Min": -2.9434715262409705,
+        "Max-Min": 3.9111050189280516,
+        "Oráculo por tarea": -0.0363322540097577,
+        "pct_gpu": 78.53
+      }
+    },
+    "dataset_rl_counter.csv": {
+      "DQN actual": {
+        "Solo CPU": 2347.25714881314,
+        "Solo GPU": 0.06504968120871757,
+        "MET": -0.03041698947316429,
+        "MCT": 20.64938536119165,
+        "Min-Min": 13.278881612300232,
+        "Max-Min": 32.472937058892704,
+        "Oráculo por tarea": 0.018163722738850918,
+        "DQN counter": 0.03342860812713955,
+        "pct_gpu": 78.34
+      },
+      "DQN counter": {
+        "Solo CPU": 2346.836446869255,
+        "Solo GPU": 0.034242519679783534,
+        "MET": -0.06583761934098598,
+        "MCT": 20.585617713759852,
+        "Min-Min": 13.225430518874937,
+        "Max-Min": 32.416018949216365,
+        "Oráculo por tarea": -0.0108434787471412,
+        "DQN actual": -0.033417436952232205,
+        "pct_gpu": 86.045
+      }
+    }
+  }
+}

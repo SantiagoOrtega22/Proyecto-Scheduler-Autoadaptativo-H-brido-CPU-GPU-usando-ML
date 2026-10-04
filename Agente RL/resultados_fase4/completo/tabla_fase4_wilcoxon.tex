@@ -1,0 +1,20 @@
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\caption[Comparación estadística del EDP de sistema sobre 100 colas (configuraciones medidas (conjunto completo)).]{Diferencia relativa de EDP de sistema de cada política respecto del agente sobre 100 colas de 200 tareas de configuraciones medidas (conjunto completo). Valores positivos: el agente obtiene menor EDP. Prueba de Wilcoxon de rangos con signo pareada por cola con corrección de Holm; $r = |Z|/\sqrt{n}$; umbral de relevancia práctica: 1\,\%.}
+\label{tab:fase4_wilcoxon}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{|l|r|c|c|c|c|}
+\hline
+\textbf{Política} & \textbf{Mediana (\%)} & \textbf{IQR (\%)} & \textbf{$p$ (Holm)} & \textbf{$r$} & \textbf{¿Supera 1\,\%?} \\ \hline
+Solo CPU & $+1352.77$ & [$+1181.41$; $+1538.65$] & $< 0.001$ & $0.87$ & Sí, agente mejor \\ \hline
+Solo GPU & $+0.21$ & [$+0.16$; $+0.27$] & $< 0.001$ & $0.87$ & No \\ \hline
+MET & $+0.04$ & [$-0.02$; $+0.10$] & $0.002$ & $0.30$ & No \\ \hline
+MCT & $-4.95$ & [$-6.89$; $-2.40$] & $< 0.001$ & $0.85$ & Sí, política mejor \\ \hline
+Min-Min & $-2.94$ & [$-4.30$; $-1.90$] & $< 0.001$ & $0.79$ & Sí, política mejor \\ \hline
+Max-Min & $+3.91$ & [$+2.04$; $+6.92$] & $< 0.001$ & $0.82$ & Sí, agente mejor \\ \hline
+\textit{Oráculo (referencia)} & $-0.036$ & [$-0.066$; $-0.013$] & --- & --- & --- \\ \hline
+\end{tabular}%
+}
+\end{table}
+% FUENTE: evaluar_fase4_estadistica.py -> resumen_estadistico.json

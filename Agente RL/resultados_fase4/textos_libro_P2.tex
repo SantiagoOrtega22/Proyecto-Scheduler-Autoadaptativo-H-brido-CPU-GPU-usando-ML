@@ -1,0 +1,150 @@
+% =============================================================================
+% Textos para el libro — revisión P2 (comparación estadística del OE4)
+% Cifras: resultados_fase4/reservados/resumen_estadistico.json
+%         (sensibilidad: resultados_fase4/completo/resumen_estadistico.json)
+% Generado con: python evaluar_fase4_estadistica.py [--fuente completo]
+% =============================================================================
+
+
+% -----------------------------------------------------------------------------
+% 1. METODOLOGÍA — Fase 4 (reemplaza la descripción de la cola única)
+% -----------------------------------------------------------------------------
+
+\paragraph{Comparación estadística.}
+El agente se compara con las seis políticas de referencia (Solo CPU, Solo GPU, MET,
+MCT, Min-Min y Max-Min) sobre 100 colas de 200 tareas. Las colas se generan a partir
+de los tamaños reservados en la prueba de interpolación (Sección~\ref{sec:interpolacion}),
+es decir, con tareas cuyo tamaño de problema el agente no observó durante el
+entrenamiento: la cola de semilla $s \in \{0, \dots, 99\}$ se muestrea sin reemplazo
+entre las tareas reservadas de la partición $k = s \bmod 5$, de modo que cada partición
+aporta 20 colas, y se evalúa con los cinco agentes entrenados sin esa partición. El EDP
+de sistema del agente en una cola es la media de esos cinco agentes. Todas las políticas
+se evalúan sobre las mismas colas, con el tiempo de sistema definido como el
+\textit{makespan} de las colas paralelas de CPU y GPU y el EDP de sistema como el producto
+de la energía total por ese tiempo.
+
+Para cada cola $i$ y cada política $P$ se calcula la diferencia relativa de EDP de sistema
+respecto del agente,
+\begin{equation}
+  d_{i}(P) = 100 \left( \frac{\mathrm{EDP}_{i}(P)}{\mathrm{EDP}_{i}(\text{agente})} - 1 \right) \%,
+\end{equation}
+de modo que $d_{i}(P) > 0$ indica que el agente obtiene menor EDP que la política $P$ en
+esa cola. Para cada una de las seis comparaciones se aplica la prueba de rangos con signo
+de Wilcoxon pareada por cola ($H_0$: la mediana de $d(P)$ es cero), con aproximación normal
+y corrección por empates, y los seis valores $p$ se ajustan con la corrección de Holm
+($\alpha = 0{,}05$). El tamaño del efecto se reporta como $r = |Z|/\sqrt{n}$, con $n$ el
+número de colas con diferencia no nula. Se reportan la mediana y el rango intercuartílico
+(IQR) de $d(P)$.
+
+Antes de calcular las pruebas se fijó un umbral de relevancia práctica de 1\,\% del EDP de
+sistema: con 100 colas pareadas, diferencias del orden de 0,1\,\% pueden resultar
+estadísticamente significativas sin tener importancia práctica. Una diferencia se considera
+relevante solo si es significativa tras la corrección de Holm y su mediana supera el umbral
+en valor absoluto. El oráculo por tarea (el dispositivo de menor EDP para cada tarea, conocido
+a posteriori) se reporta solo como referencia descriptiva, porque no es una política
+implementable. Como análisis de sensibilidad se repite el procedimiento con colas muestreadas
+del conjunto completo y el modelo final del agente.
+
+
+% -----------------------------------------------------------------------------
+% 2. RESULTADOS — Fase 4: nueva subsección
+%    (reemplaza la tabla tab:fase4_interpolacion de una cola por partición)
+% -----------------------------------------------------------------------------
+
+\subsection{Comparación estadística sobre 100 colas}
+\label{sec:fase4_estadistica}
+
+La Figura~\ref{fig:fase4_robustez} muestra la distribución, cola a cola, de la diferencia de
+EDP de sistema de cada política respecto del agente, y la Tabla~\ref{tab:fase4_wilcoxon}
+resume las pruebas. Las seis diferencias son significativas tras la corrección de Holm
+($p < 0{,}001$), pero solo cuatro superan el umbral de relevancia práctica.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{figuras/fase4_robustez.png}
+  \caption{Diferencia de EDP de sistema de cada política respecto del agente en 100 colas
+  de 200 tareas de tamaños no observados. Cada punto es una cola; la caja marca el IQR y
+  la línea gruesa la mediana. La franja gris corresponde al umbral de relevancia de
+  $\pm 1$\,\%. Solo CPU se muestra en un panel aparte por su escala.}
+  \label{fig:fase4_robustez}
+\end{figure}
+
+\input{tablas/tabla_fase4_wilcoxon.tex}
+
+El agente supera con diferencias relevantes a Solo CPU (mediana $+1397$\,\%, en las 100
+colas) y a Max-Min (mediana $+3{,}74$\,\%, IQR $[+1{,}44;\ +5{,}43]$\,\%, mejor en 89 de 100
+colas). Frente a Solo GPU ($+0{,}23$\,\%) y MET ($+0{,}06$\,\%) las diferencias son
+significativas pero quedan por debajo del umbral: en la práctica, el agente es equivalente a
+estas dos políticas. MCT y Min-Min obtienen menor EDP de sistema que el agente, con
+diferencias relevantes: medianas de $-4{,}34$\,\% (IQR $[-7{,}48;\ -2{,}88]$\,\%) y
+$-3{,}34$\,\% (IQR $[-4{,}76;\ -2{,}05]$\,\%), y el agente solo las supera en 3 y 4 de las 100
+colas, respectivamente.
+
+El agente queda a una mediana de 0,02\,\% del oráculo por tarea, es decir, resuelve casi sin
+error el problema para el que fue entrenado: elegir, para cada tarea, el dispositivo de menor
+EDP. La desventaja frente a MCT y Min-Min no proviene de errores de clasificación, sino de la
+formulación del problema. El estado del agente describe solo la tarea actual, no la ocupación
+de las colas, y su recompensa es inmediata ($\gamma = 0$). Por tanto, no puede equilibrar el
+\textit{makespan} entre CPU y GPU. MCT y Min-Min, en cambio, envían a la CPU parte de las
+tareas en que la GPU es más rápida. En la mediana por cola, frente al agente, reducen el
+\textit{makespan} de 16,2~s a 13,0~s y 13,7~s, a costa de 15\,\% y 7\,\% más energía. Como el
+EDP de sistema multiplica la energía total por el \textit{makespan}, ese equilibrio compensa.
+Max-Min reduce el tiempo en una proporción similar (13,3~s), pero con 27\,\% más energía, y
+termina con mayor EDP que el agente.
+
+Los resultados no dependen de la semilla del agente: al usar por separado cada uno de los
+cinco agentes de cada partición, las medianas cambian como máximo 0,01 puntos porcentuales.
+Con colas tomadas del conjunto completo y el modelo final del agente se obtienen las mismas
+conclusiones (Solo GPU $+0{,}21$\,\%, MET $+0{,}04$\,\%, MCT $-4{,}95$\,\%, Min-Min
+$-2{,}94$\,\%, Max-Min $+3{,}91$\,\%; todas con $p_{\mathrm{Holm}} < 0{,}01$).
+
+
+% -----------------------------------------------------------------------------
+% 3. CONCLUSIONES — OE4 (reemplaza el texto actual)
+% -----------------------------------------------------------------------------
+
+Sobre 100 colas de 200 tareas de tamaños no observados, comparadas con la prueba de Wilcoxon
+pareada y corrección de Holm, el agente redujo el EDP de sistema de forma significativa y
+relevante frente a Solo CPU (mediana 1397\,\%) y frente a Max-Min (mediana 3,7\,\%), y fue
+equivalente en la práctica a Solo GPU y MET (diferencias de 0,23\,\% y 0,06\,\%, por debajo
+del umbral de 1\,\%). MCT y Min-Min obtuvieron un EDP de sistema menor que el del agente en
+4,3\,\% y 3,3\,\% (medianas). El agente alcanza casi el óptimo por tarea (0,02\,\% del
+oráculo), pero una política que decide tarea por tarea, sin observar la ocupación de las
+colas, no captura el beneficio de equilibrar el \textit{makespan} que aprovechan MCT y
+Min-Min. El OE4 se cumple como comparación: la evaluación cuantifica con significancia
+estadística y relevancia práctica en qué casos el agente mejora a las políticas de referencia
+y en cuáles no.
+
+
+% -----------------------------------------------------------------------------
+% 4. CONCLUSIÓN GENERAL — frase a incorporar
+% -----------------------------------------------------------------------------
+
+En la evaluación de sistema sobre 100 colas de tamaños no observados, el agente redujo el EDP
+frente a Solo CPU y Max-Min (medianas de 1397\,\% y 3,7\,\%), igualó en la práctica a Solo GPU
+y MET, y quedó por detrás de MCT y Min-Min (medianas de $-4{,}3$\,\% y $-3{,}3$\,\%), que
+equilibran el \textit{makespan} entre dispositivos; incorporar la ocupación de las colas al
+estado del agente es la extensión natural para cerrar esa brecha.
+
+
+% -----------------------------------------------------------------------------
+% 5. RESUMEN — frase a incorporar (sustituye las cifras de la cola única)
+% -----------------------------------------------------------------------------
+
+Sobre 100 colas de 200 tareas de tamaños no observados (prueba de Wilcoxon pareada con
+corrección de Holm y umbral de relevancia de 1\,\%), el agente redujo el EDP de sistema frente
+a Solo CPU y Max-Min (medianas de 1397\,\% y 3,7\,\%), fue equivalente a Solo GPU y MET, y
+obtuvo un EDP 4,3\,\% y 3,3\,\% mayor que MCT y Min-Min.
+
+
+% -----------------------------------------------------------------------------
+% 6. LIMITACIONES
+%    - RETIRAR: «Evaluación sobre una única cola».
+%    - AGREGAR (opcional, sustenta la discusión de MCT/Min-Min):
+% -----------------------------------------------------------------------------
+
+\textbf{Decisión por tarea, sin estado de las colas.} El estado del agente describe la tarea
+actual y su recompensa es inmediata; no incluye la ocupación de las colas de CPU y GPU. Por
+ello el agente optimiza el EDP de cada tarea, pero no el \textit{makespan} del lote, que es lo
+que aprovechan MCT y Min-Min en el EDP de sistema. Incorporar esa información al estado queda
+como trabajo futuro.
