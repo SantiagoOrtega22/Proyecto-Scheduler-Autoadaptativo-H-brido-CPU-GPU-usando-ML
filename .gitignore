@@ -17,3 +17,8 @@ bench_files/databank/
 # Python
 __pycache__/
 *.pyc
+.vscode/
+
+
+# Configuración local del editor
+.vscode/

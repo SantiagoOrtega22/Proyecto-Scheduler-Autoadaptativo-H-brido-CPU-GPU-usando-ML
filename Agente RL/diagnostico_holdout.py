@@ -41,7 +41,7 @@ def medir_precision_split(
 
     Args:
         modelo: Modelo DQN entrenado a evaluar.
-        csv_path: Ruta al dataset_pacca.csv.
+        csv_path: Ruta al CSV codificado (p. ej. dataset_rl.csv).
         split: 'train' o 'holdout', debe coincidir con el split usado al entrenar.
         holdout_fraction: Debe coincidir con la fraccion usada al entrenar el modelo.
 
@@ -81,10 +81,10 @@ def ejecutar_diagnostico(dataset: str | None = None) -> None:
         dataset: Ruta al CSV codificado a usar tanto para entrenar como para medir
             precisión. Debe ser el MISMO en ambos pasos, o la comparación train vs.
             holdout queda contaminada por un cambio de distribución. Si es None,
-            usa Entorno/dataset_pacca.csv (comportamiento previo, GEMM-only).
+            usa Entorno/dataset_rl.csv (GEMM + FFT, el mismo default de train.py).
     """
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    csv_path = dataset if dataset else os.path.join(base_dir, "Entorno", "dataset_pacca.csv")
+    csv_path = dataset if dataset else os.path.join(base_dir, "Entorno", "dataset_rl.csv")
 
     print(f"--- Entrenando modelo de diagnostico (holdout={HOLDOUT_FRACTION:.0%}) ---")
     modelo_path = entrenar_agente(
@@ -111,7 +111,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dataset", type=str, default=None,
         help="Ruta al CSV codificado a usar para entrenar Y medir precisión "
-             "(debe ser el mismo en ambos pasos). Por defecto: Entorno/dataset_pacca.csv.",
+             "(debe ser el mismo en ambos pasos). Por defecto: Entorno/dataset_rl.csv.",
     )
     args = parser.parse_args()
     ejecutar_diagnostico(dataset=args.dataset)

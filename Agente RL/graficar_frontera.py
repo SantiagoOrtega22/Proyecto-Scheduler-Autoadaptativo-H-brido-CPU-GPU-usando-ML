@@ -22,10 +22,9 @@ def generar_grafica_frontera(dataset: str | None = None):
     base_dir = os.path.dirname(os.path.abspath(__file__))
     modelo_path = os.path.join(base_dir, "modelo_dqn_scheduler.zip")
     # Debe apuntar al MISMO dataset con el que se entrenó el modelo (el nombre de
-    # archivo no queda registrado dentro del .zip). Por defecto dataset_pacca.csv
-    # por compatibilidad con corridas previas; pasar --dataset para un dataset
-    # FFT-only, GEMM-only o mixto distinto.
-    csv_path = dataset if dataset else os.path.join(base_dir, "Entorno", "dataset_pacca.csv")
+    # archivo no queda registrado dentro del .zip). Por defecto dataset_rl.csv,
+    # el mismo default de train.py; pasar --dataset para un dataset distinto.
+    csv_path = dataset if dataset else os.path.join(base_dir, "Entorno", "dataset_rl.csv")
 
     if not os.path.exists(modelo_path):
         print(f"Error: No se encontró el modelo entrenado en {modelo_path}")
@@ -117,7 +116,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dataset", type=str, default=None,
         help="Ruta al CSV codificado a usar. Debe coincidir con el dataset usado "
-             "para entrenar el modelo. Por defecto: Entorno/dataset_pacca.csv.",
+             "para entrenar el modelo. Por defecto: Entorno/dataset_rl.csv.",
     )
     args = parser.parse_args()
     generar_grafica_frontera(dataset=args.dataset)

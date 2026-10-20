@@ -56,7 +56,7 @@ def construir_cola_evaluacion(csv_path: str, num_muestras: int) -> list[dict]:
     """Construye la cola de tareas de evaluación, idéntica para todas las semillas.
 
     Args:
-        csv_path: Ruta del dataset de benchmark (`dataset_pacca.csv`).
+        csv_path: Ruta del dataset de benchmark (`dataset_rl.csv`).
         num_muestras: Cantidad de tareas a muestrear para la carga de trabajo.
 
     Returns:
@@ -467,7 +467,7 @@ def ejecutar_barrido(
         reusar: Reutiliza modelos ya entrenados en disco en lugar de re-entrenar.
     """
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    csv_path = dataset if dataset else os.path.join(base_dir, "Entorno", "dataset_pacca.csv")
+    csv_path = dataset if dataset else os.path.join(base_dir, "Entorno", "dataset_rl.csv")
 
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"No se encontró el dataset en: {csv_path}")
@@ -516,7 +516,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dataset", type=str, default=None,
         help="Ruta al CSV codificado a usar para entrenar Y evaluar TODAS las semillas "
-             "(debe ser el mismo en ambos pasos). Por defecto: Entorno/dataset_pacca.csv.",
+             "(debe ser el mismo en ambos pasos). Por defecto: Entorno/dataset_rl.csv.",
     )
     args = parser.parse_args()
 
