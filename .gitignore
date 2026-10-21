@@ -22,3 +22,9 @@ __pycache__/
 
 # Configuración local del editor
 .vscode/
+
+# Logos institucionales usados en el README
+!assets/
+!assets/logos/
+!assets/logos/*.png
+!assets/*.png
