@@ -1,9 +1,9 @@
 <p align="left">
-  <img src="assets/logos/uis.png" alt="Universidad Industrial de Santander" height="70">
+  <img src="assets/logos/uis.png" alt="Universidad Industrial de Santander" height="80">
   &nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="assets/logos/cage.png" alt="Grupo CAGE" height="70">
+  <img src="assets/logos/cage.png" alt="Grupo CAGE" height="80">
   &nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="assets/logos/sc3.png" alt="SC3" height="70">
+  <img src="assets/logos/sc3.png" alt="SC3" height="80">
 </p>
 
 # Planificador de Tareas CPU-GPU basado en Aprendizaje por Refuerzo para la Optimización del EDP
