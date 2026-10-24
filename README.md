@@ -35,8 +35,8 @@ Mediciones y validación realizadas en el nodo heterogéneo `paccaA100` de la **
 |---|---|
 | **Universidad** | Universidad Industrial de Santander (UIS) |
 | **Facultad / Escuela** | Escuela de Ingeniería de Sistemas e Informática |
-| **Autores** | _[Nombre completo del autor 1]_ · _[Nombre completo del autor 2]_ |
-| **Director** | _[Nombre completo del director]_ |
+| **Autores** | Santiago Ortega Veloza · Daniel Santiago Convers Castellanos |
+| **Director** | Sergio Augusto Gélvez Cortés |
 | **Grupos de investigación** | **CAGE** · **SC3** (Supercomputación y Cálculo Científico, UIS) |
 | **Infraestructura de validación** | Nodo `paccaA100` de la Universidad de Cartagena — 2× Intel Xeon Gold 5315Y y 1× NVIDIA A100 |
 
